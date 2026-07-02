@@ -1,0 +1,47 @@
+name: Release
+
+# Релиз по пушу тега vX.Y.Z (тег обычно создаёт bump-version.yml):
+# собрать бинарник, сгенерировать changelog (git-cliff) и выложить GitHub Release.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.ref_name }} # vX.Y.Z; build.yml срежет ведущую v
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-cliff нужна вся история
+
+      - name: Generate changelog
+        id: cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          # Группировка/фильтрация — в cliff.toml. В changelog попадают только
+          # пользовательские изменения (feat/fix/perf/security).
+          config: cliff.toml
+          args: --latest --strip all
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: clipmgr ${{ github.ref_name }}
+          body: ${{ steps.cliff.outputs.content }}
+          files: artifacts/*
