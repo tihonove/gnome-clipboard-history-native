@@ -47,7 +47,8 @@ jobs:
           echo "$new" > VERSION
           git add VERSION
           git commit -m "chore(release): v$new"
-          git tag "v$new"
+          # Аннотированный тег: git push --follow-tags пушит только их (лёгкие — нет).
+          git tag -a "v$new" -m "v$new"
 
       - name: Push commit and tag
         run: git push origin HEAD --follow-tags
