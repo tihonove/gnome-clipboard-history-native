@@ -27,13 +27,15 @@ import (
 	"github.com/jezek/xgb/xtest"
 	"github.com/jezek/xgbutil"
 	"github.com/jezek/xgbutil/ewmh"
+	"github.com/jezek/xgbutil/icccm"
 	"github.com/jezek/xgbutil/keybind"
 )
 
 const (
-	listW  = 340 // ширина списка (без учёта рамки/тени)
-	popupW = 372 // оценка полного размера окна (для позиционирования)
-	popupH = 360
+	listW    = 340 // ширина списка (без учёта рамки/тени)
+	popupW   = 372 // оценка полного размера окна (для позиционирования)
+	popupH   = 360
+	pageStep = 3 // на сколько прыгать по PageUp/PageDown (≈ число видимых строк)
 )
 
 const cssData = `
@@ -66,9 +68,11 @@ list row:selected {
 `
 
 var (
-	X       *xgbutil.XUtil
-	ctrlKey xproto.Keycode
-	vKey    xproto.Keycode
+	X        *xgbutil.XUtil
+	ctrlKey  xproto.Keycode
+	vKey     xproto.Keycode
+	shiftKey xproto.Keycode
+	spareKey xproto.Keycode // запасной keycode для layout-независимой вставки
 
 	win       *gtk.Window
 	listBox   *gtk.ListBox
@@ -125,6 +129,10 @@ func runDaemon() {
 	if vs := keybind.StrToKeycodes(X, "v"); len(vs) > 0 {
 		vKey = vs[0]
 	}
+	if ss := keybind.StrToKeycodes(X, "Shift_L"); len(ss) > 0 {
+		shiftKey = ss[0]
+	}
+	spareKey = findSpareKeycode()
 
 	gtk.Init(nil)
 	applyCSS()
@@ -252,6 +260,20 @@ func addClass(w interface {
 	}
 }
 
+// setSel зажимает индекс в [0, len-1] и, если он изменился, обновляет выделение.
+func setSel(i int) {
+	if i < 0 {
+		i = 0
+	}
+	if i > len(items)-1 {
+		i = len(items) - 1
+	}
+	if i != selIdx {
+		selIdx = i
+		updateSelection()
+	}
+}
+
 func updateSelection() {
 	if listBox == nil {
 		return
@@ -309,15 +331,17 @@ func startKeyPoll() {
 			}
 			switch keybind.LookupString(X, kp.State, kp.Detail) {
 			case "Up":
-				if selIdx > 0 {
-					selIdx--
-					updateSelection()
-				}
+				setSel(selIdx - 1)
 			case "Down":
-				if selIdx < len(items)-1 {
-					selIdx++
-					updateSelection()
-				}
+				setSel(selIdx + 1)
+			case "Prior", "Page_Up":
+				setSel(selIdx - pageStep)
+			case "Next", "Page_Down":
+				setSel(selIdx + pageStep)
+			case "Home":
+				setSel(0)
+			case "End":
+				setSel(len(items) - 1)
 			case "Return", "KP_Enter":
 				finish(true)
 			case "Escape":
@@ -350,8 +374,34 @@ func finish(paste bool) {
 
 	if paste && text != "" {
 		setClipboard(text)
-		pasteCtrlV()
+		pasteInto(isTerminal(targetWin)) // терминалам — Ctrl+Shift+V, остальным — Ctrl+V
 	}
+}
+
+// isTerminal определяет, что целевое окно — терминал (по WM_CLASS).
+func isTerminal(w xproto.Window) bool {
+	if w == 0 {
+		return false
+	}
+	cl, err := icccm.WmClassGet(X, w)
+	if err != nil || cl == nil {
+		return false
+	}
+	return isTermClass(strings.ToLower(cl.Class)) || isTermClass(strings.ToLower(cl.Instance))
+}
+
+func isTermClass(s string) bool {
+	if strings.Contains(s, "terminal") || strings.Contains(s, "console") {
+		return true // gnome-terminal, xfce4-terminal, org.gnome.Console (kgx) и т.п.
+	}
+	switch s {
+	case "kitty", "foot", "footclient", "alacritty", "st", "st-256color",
+		"xterm", "urxvt", "rxvt", "rxvt-unicode", "konsole", "org.kde.konsole",
+		"wezterm", "org.wezfurlong.wezterm", "tilix", "terminator", "guake",
+		"kgx", "ghostty", "com.mitchellh.ghostty":
+		return true
+	}
+	return false
 }
 
 func setClipboard(s string) {
@@ -363,11 +413,64 @@ func setClipboard(s string) {
 	clip.SetText(s)
 }
 
-func pasteCtrlV() {
+// pasteInto шлёт Ctrl+V (или Ctrl+Shift+V для терминалов) через XTEST,
+// НЕ завися от активной раскладки: временно мапит запасной keycode на keysym 'v'
+// (как это делает xdotool), шлёт его, затем возвращает мэппинг.
+func pasteInto(term bool) {
+	v := vKey
+	if spareKey != 0 {
+		// firstKeycode=spareKey, keysymsPerKeycode=2 → уровень0='v'(0x76), уровень1='V'(0x56)
+		xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, 2, []xproto.Keysym{0x0076, 0x0056})
+		xsync()
+		v = spareKey
+	}
+
 	fakeKey(true, ctrlKey)
-	fakeKey(true, vKey)
-	fakeKey(false, vKey)
+	if term {
+		fakeKey(true, shiftKey)
+	}
+	fakeKey(true, v)
+	fakeKey(false, v)
+	if term {
+		fakeKey(false, shiftKey)
+	}
 	fakeKey(false, ctrlKey)
+	xsync()
+
+	if spareKey != 0 {
+		xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, 2, []xproto.Keysym{0, 0}) // вернуть NoSymbol
+		xsync()
+	}
+}
+
+// findSpareKeycode ищет неиспользуемый keycode (все keysym = 0), который можно
+// временно перемапливать под вставку.
+func findSpareKeycode() xproto.Keycode {
+	setup := xproto.Setup(X.Conn())
+	minKc, maxKc := int(setup.MinKeycode), int(setup.MaxKeycode)
+	m, err := xproto.GetKeyboardMapping(X.Conn(), setup.MinKeycode, byte(maxKc-minKc+1)).Reply()
+	if err != nil {
+		return 0
+	}
+	per := int(m.KeysymsPerKeycode)
+	for kc := maxKc; kc >= minKc; kc-- {
+		base := (kc - minKc) * per
+		empty := true
+		for j := 0; j < per && base+j < len(m.Keysyms); j++ {
+			if m.Keysyms[base+j] != 0 {
+				empty = false
+				break
+			}
+		}
+		if empty {
+			return xproto.Keycode(kc)
+		}
+	}
+	return 0
+}
+
+// xsync — round-trip, чтобы сервер применил запрос до следующего шага.
+func xsync() {
 	xproto.GetInputFocus(X.Conn()).Reply()
 }
 
