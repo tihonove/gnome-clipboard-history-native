@@ -82,11 +82,12 @@ var (
 	shiftKey xproto.Keycode
 	spareKey xproto.Keycode // запасной keycode для layout-независимой вставки
 
-	win       *gtk.Window
-	listBox   *gtk.ListBox
-	scrolled  *gtk.ScrolledWindow
-	selIdx    int
-	targetWin xproto.Window
+	win            *gtk.Window
+	listBox        *gtk.ListBox
+	scrolled       *gtk.ScrolledWindow
+	selIdx         int
+	targetWin      xproto.Window
+	popupX, popupY int // куда поставили окно (для проверки клика мимо)
 
 	grabTries int
 
@@ -502,6 +503,7 @@ func showPopup() {
 	w.ShowAll()
 
 	win = w
+	popupX, popupY = x, y
 	selIdx = 0
 	updateSelection()
 	log.Printf("popup показан в (%d,%d), target=%d, записей=%d", x, y, targetWin, len(history))
@@ -523,6 +525,15 @@ func addClass(w interface {
 	if sc, err := w.GetStyleContext(); err == nil {
 		sc.AddClass(cls)
 	}
+}
+
+// insidePopup — попал ли клик (в координатах экрана) в прямоугольник окна попапа.
+func insidePopup(x, y int) bool {
+	if win == nil {
+		return false
+	}
+	w, h := win.GetSize()
+	return x >= popupX && x < popupX+w && y >= popupY && y < popupY+h
 }
 
 // setSel зажимает индекс в [0, len-1] и, если он изменился, обновляет выделение.
@@ -568,6 +579,11 @@ func tryGrab() {
 	gk, err := xproto.GrabKeyboard(X.Conn(), false, X.RootWin(), xproto.TimeCurrentTime,
 		xproto.GrabModeAsync, xproto.GrabModeAsync).Reply()
 	if err == nil && gk.Status == xproto.GrabStatusSuccess {
+		// Захватываем и указатель — чтобы ловить клики мимо окна и закрываться.
+		xproto.GrabPointer(X.Conn(), false, X.RootWin(),
+			uint16(xproto.EventMaskButtonPress),
+			xproto.GrabModeAsync, xproto.GrabModeAsync,
+			xproto.Window(0), xproto.Cursor(0), xproto.TimeCurrentTime)
 		startKeyPoll()
 		return
 	}
@@ -590,27 +606,30 @@ func startKeyPoll() {
 			if err != nil || ev == nil {
 				break
 			}
-			kp, ok := ev.(xproto.KeyPressEvent)
-			if !ok {
-				continue
-			}
-			switch keybind.LookupString(X, kp.State, kp.Detail) {
-			case "Up":
-				setSel(selIdx - 1)
-			case "Down":
-				setSel(selIdx + 1)
-			case "Prior", "Page_Up":
-				setSel(selIdx - pageStep)
-			case "Next", "Page_Down":
-				setSel(selIdx + pageStep)
-			case "Home":
-				setSel(0)
-			case "End":
-				setSel(len(history) - 1)
-			case "Return", "KP_Enter":
-				finish(true)
-			case "Escape":
-				finish(false)
+			switch e := ev.(type) {
+			case xproto.KeyPressEvent:
+				switch keybind.LookupString(X, e.State, e.Detail) {
+				case "Up":
+					setSel(selIdx - 1)
+				case "Down":
+					setSel(selIdx + 1)
+				case "Prior", "Page_Up":
+					setSel(selIdx - pageStep)
+				case "Next", "Page_Down":
+					setSel(selIdx + pageStep)
+				case "Home":
+					setSel(0)
+				case "End":
+					setSel(len(history) - 1)
+				case "Return", "KP_Enter":
+					finish(true)
+				case "Escape":
+					finish(false)
+				}
+			case xproto.ButtonPressEvent:
+				if !insidePopup(int(e.RootX), int(e.RootY)) {
+					finish(false) // клик мимо окна — закрыть
+				}
 			}
 			if win == nil {
 				return false
@@ -627,6 +646,7 @@ func finish(paste bool) {
 	w := win
 	win = nil
 	xproto.UngrabKeyboard(X.Conn(), xproto.TimeCurrentTime)
+	xproto.UngrabPointer(X.Conn(), xproto.TimeCurrentTime)
 
 	text := ""
 	if paste && selIdx >= 0 && selIdx < len(history) {
