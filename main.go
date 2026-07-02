@@ -1,6 +1,6 @@
-// clipmgr — спайк №4: список истории (статичные данные) в стиле Windows/Nautilus.
+// clipmgr — нативная история буфера обмена (Win+V) для GNOME/X11.
 //
-// Резидентный GTK-демон. По Super+B (через GNOME-хоткей → clipmgr --show → сокет)
+// Резидентный GTK-демон. По Super+V (через GNOME-хоткей → clipmgr --show → сокет)
 // показывает у курсора/окна попап: заголовок "Clipboard" + прокручиваемый список
 // записей. Каждая запись обрезается до 3 строк. Выделение — акцентная обводка
 // (Yaru accent) как фокус файла в Nautilus. Up/Down двигают выделение, Enter
@@ -115,7 +115,7 @@ func main() {
 		case "--help", "-h":
 			fmt.Println("clipmgr — история буфера (Win+V) для GNOME/X11\n" +
 				"  clipmgr             запустить демона\n" +
-				"  clipmgr --install   прописать автозапуск и хоткей Super+B, запустить демона\n" +
+				"  clipmgr --install   прописать автозапуск и хоткей Super+V, запустить демона\n" +
 				"  clipmgr --uninstall убрать автозапуск и хоткей\n" +
 				"  clipmgr --show      показать попап (вызывается хоткеем)\n" +
 				"  clipmgr --version   версия")
@@ -141,7 +141,7 @@ func runClient() {
 const (
 	mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
 	customPrefix    = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
-	hotkeyBinding   = "<Super>b"
+	hotkeyBinding   = "<Super>v"
 	hotkeyName      = "clipmgr"
 )
 
@@ -158,7 +158,7 @@ func runInstall() {
 	installAutostart(exe)
 	installHotkey(exe)
 	startDaemon(exe)
-	fmt.Println("Готово. clipmgr в автозапуске, Super+B настроен, демон запущен.")
+	fmt.Println("Готово. clipmgr в автозапуске, Super+V настроен, демон запущен.")
 }
 
 func runUninstall() {
@@ -210,7 +210,7 @@ func installHotkey(exe string) {
 	gsSet(customPath(slot), "name", quote(hotkeyName))
 	gsSet(customPath(slot), "command", quote(cmd))
 	gsSet(customPath(slot), "binding", quote(hotkeyBinding))
-	fmt.Println("хоткей Super+B →", slot)
+	fmt.Println("хоткей Super+V →", slot)
 }
 
 func removeHotkey() {
@@ -467,11 +467,11 @@ func showPopup() {
 	outer.PackStart(header, false, false, 0)
 
 	if len(history) == 0 {
-		ph, _ := gtk.LabelNew("Пусто.\nСкопируйте что-нибудь (Ctrl+C).")
+		ph, _ := gtk.LabelNew("Clipboard is empty.\nCopy something to see it here.")
 		ph.SetJustify(gtk.JUSTIFY_CENTER)
 		ph.SetHAlign(gtk.ALIGN_CENTER)
 		ph.SetVAlign(gtk.ALIGN_CENTER)
-		ph.SetSizeRequest(listW, 120)
+		ph.SetSizeRequest(listW, 285) // та же высота, что и у списка
 		addClass(ph, "clip-empty")
 		outer.PackStart(ph, true, true, 0)
 	} else {
