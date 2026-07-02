@@ -12,11 +12,14 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
@@ -32,10 +35,11 @@ import (
 )
 
 const (
-	listW    = 340 // ширина списка (без учёта рамки/тени)
-	popupW   = 372 // оценка полного размера окна (для позиционирования)
-	popupH   = 360
-	pageStep = 3 // на сколько прыгать по PageUp/PageDown (≈ число видимых строк)
+	listW      = 340 // ширина списка (без учёта рамки/тени)
+	popupW     = 372 // оценка полного размера окна (для позиционирования)
+	popupH     = 360
+	pageStep   = 3   // на сколько прыгать по PageUp/PageDown (≈ число видимых строк)
+	maxHistory = 100 // сколько записей держим в памяти
 )
 
 const cssData = `
@@ -65,6 +69,10 @@ list row:selected {
   border-color: @theme_selected_bg_color;
   background-color: alpha(@theme_selected_bg_color, 0.14);
 }
+.clip-empty {
+  padding: 28px 18px;
+  color: alpha(@theme_fg_color, 0.55);
+}
 `
 
 var (
@@ -82,13 +90,37 @@ var (
 
 	grabTries int
 
-	items = clipItems()
+	clipboard *gtk.Clipboard // CLIPBOARD: и слушаем, и владеем им при вставке
+	history   []string       // история буфера, свежие сверху (только в памяти)
 )
 
+// version зашивается при релизной сборке через -ldflags "-X main.version=…".
+var version = "dev"
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "--show" {
-		runClient()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--show":
+			runClient()
+			return
+		case "--install":
+			runInstall()
+			return
+		case "--uninstall":
+			runUninstall()
+			return
+		case "--version", "-v":
+			fmt.Println("clipmgr", version)
+			return
+		case "--help", "-h":
+			fmt.Println("clipmgr — история буфера (Win+V) для GNOME/X11\n" +
+				"  clipmgr             запустить демона\n" +
+				"  clipmgr --install   прописать автозапуск и хоткей Super+B, запустить демона\n" +
+				"  clipmgr --uninstall убрать автозапуск и хоткей\n" +
+				"  clipmgr --show      показать попап (вызывается хоткеем)\n" +
+				"  clipmgr --version   версия")
+			return
+		}
 	}
 	runDaemon()
 }
@@ -103,6 +135,187 @@ func runClient() {
 	defer c.Close()
 	c.Write([]byte("show\n"))
 }
+
+// ---------- установка (--install / --uninstall) ----------
+
+const (
+	mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
+	customPrefix    = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
+	hotkeyBinding   = "<Super>b"
+	hotkeyName      = "clipmgr"
+)
+
+// runInstall прописывает автозапуск и горячую клавишу на текущий путь бинарника
+// и запускает демона. Идемпотентно — можно запускать повторно.
+func runInstall() {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Fatalf("не могу определить путь бинарника: %v", err)
+	}
+	if resolved, e := filepath.EvalSymlinks(exe); e == nil {
+		exe = resolved
+	}
+	installAutostart(exe)
+	installHotkey(exe)
+	startDaemon(exe)
+	fmt.Println("Готово. clipmgr в автозапуске, Super+B настроен, демон запущен.")
+}
+
+func runUninstall() {
+	if err := os.Remove(autostartPath()); err == nil {
+		fmt.Println("убран автозапуск:", autostartPath())
+	}
+	removeHotkey()
+	if c, err := net.Dial("unix", sockPath()); err == nil {
+		c.Write([]byte("quit\n"))
+		c.Close()
+		fmt.Println("демон остановлен")
+	}
+	fmt.Println("Готово. clipmgr убран из автозапуска и хоткеев.")
+}
+
+func autostartPath() string {
+	return filepath.Join(xdgConfigHome(), "autostart", "clipmgr.desktop")
+}
+
+func installAutostart(exe string) {
+	dir := filepath.Join(xdgConfigHome(), "autostart")
+	os.MkdirAll(dir, 0o755)
+	content := "[Desktop Entry]\n" +
+		"Type=Application\n" +
+		"Name=clipmgr\n" +
+		"Comment=Clipboard history (Win+V) for GNOME/X11\n" +
+		"Exec=" + exe + "\n" +
+		"X-GNOME-Autostart-enabled=true\n" +
+		"NoDisplay=true\n" +
+		"Terminal=false\n"
+	if err := os.WriteFile(autostartPath(), []byte(content), 0o644); err != nil {
+		log.Fatalf("автозапуск: %v", err)
+	}
+	fmt.Println("автозапуск:", autostartPath())
+}
+
+func installHotkey(exe string) {
+	cmd := exe + " --show"
+	list := gsList()
+	for _, p := range list { // уже установлено?
+		if unquote(gsGet(customPath(p), "command")) == cmd {
+			fmt.Println("хоткей уже настроен:", p)
+			return
+		}
+	}
+	slot := freeSlot(list)
+	list = append(list, slot)
+	gsSet(mediaKeysSchema, "custom-keybindings", formatList(list))
+	gsSet(customPath(slot), "name", quote(hotkeyName))
+	gsSet(customPath(slot), "command", quote(cmd))
+	gsSet(customPath(slot), "binding", quote(hotkeyBinding))
+	fmt.Println("хоткей Super+B →", slot)
+}
+
+func removeHotkey() {
+	list := gsList()
+	kept := make([]string, 0, len(list))
+	for _, p := range list {
+		if unquote(gsGet(customPath(p), "name")) == hotkeyName {
+			// сбросить ключи слота
+			for _, k := range []string{"name", "command", "binding"} {
+				exec.Command("gsettings", "reset", customPath(p), k).Run()
+			}
+			fmt.Println("убран хоткей:", p)
+			continue
+		}
+		kept = append(kept, p)
+	}
+	gsSet(mediaKeysSchema, "custom-keybindings", formatList(kept))
+}
+
+// startDaemon запускает демона отдельным сеансом, если он ещё не запущен.
+func startDaemon(exe string) {
+	if c, err := net.Dial("unix", sockPath()); err == nil {
+		c.Close()
+		fmt.Println("демон уже запущен")
+		return
+	}
+	c := exec.Command(exe)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := c.Start(); err != nil {
+		fmt.Println("не удалось запустить демона:", err, "— стартанёт при следующем входе")
+		return
+	}
+	fmt.Println("демон запущен")
+}
+
+// --- helpers для gsettings и путей ---
+
+func xdgConfigHome() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config")
+}
+
+func customPath(p string) string { return mediaKeysSchema + ".custom-keybinding:" + p }
+
+func gsGet(schema, key string) string {
+	out, _ := exec.Command("gsettings", "get", schema, key).Output()
+	return strings.TrimSpace(string(out))
+}
+
+func gsSet(schema, key, val string) {
+	if err := exec.Command("gsettings", "set", schema, key, val).Run(); err != nil {
+		log.Printf("gsettings set %s %s: %v", schema, key, err)
+	}
+}
+
+func gsList() []string { return parseList(gsGet(mediaKeysSchema, "custom-keybindings")) }
+
+// freeSlot возвращает путь первого свободного customN/.
+func freeSlot(list []string) string {
+	used := map[string]bool{}
+	for _, p := range list {
+		used[p] = true
+	}
+	for i := 0; ; i++ {
+		cand := fmt.Sprintf("%scustom%d/", customPrefix, i)
+		if !used[cand] {
+			return cand
+		}
+	}
+}
+
+func parseList(s string) []string {
+	var res []string
+	for {
+		i := strings.IndexByte(s, '\'')
+		if i < 0 {
+			break
+		}
+		s = s[i+1:]
+		j := strings.IndexByte(s, '\'')
+		if j < 0 {
+			break
+		}
+		res = append(res, s[:j])
+		s = s[j+1:]
+	}
+	return res
+}
+
+func formatList(items []string) string {
+	if len(items) == 0 {
+		return "@as []"
+	}
+	q := make([]string, len(items))
+	for i, it := range items {
+		q[i] = quote(it)
+	}
+	return "[" + strings.Join(q, ", ") + "]"
+}
+
+func quote(s string) string   { return "'" + s + "'" }
+func unquote(s string) string { return strings.Trim(s, "'") }
 
 // ---------- демон ----------
 
@@ -136,6 +349,7 @@ func runDaemon() {
 
 	gtk.Init(nil)
 	applyCSS()
+	startClipboardWatch()
 	startSocketListener()
 
 	log.Println("daemon (GTK): слушаю сокет", sockPath(), "— жду --show")
@@ -172,11 +386,52 @@ func startSocketListener() {
 			buf := make([]byte, 64)
 			n, _ := c.Read(buf)
 			c.Close()
-			if strings.HasPrefix(string(buf[:n]), "show") {
+			switch {
+			case strings.HasPrefix(string(buf[:n]), "show"):
 				glib.IdleAdd(func() bool { showPopup(); return false })
+			case strings.HasPrefix(string(buf[:n]), "quit"):
+				glib.IdleAdd(func() bool { gtk.MainQuit(); return false })
 			}
 		}
 	}()
+}
+
+// ---------- слушалка буфера ----------
+
+func startClipboardWatch() {
+	var err error
+	clipboard, err = gtk.ClipboardGet(gdk.SELECTION_CLIPBOARD)
+	if err != nil {
+		log.Fatalf("clipboard: %v", err)
+	}
+	clipboard.Connect("owner-change", func() {
+		// WaitForText прямо в обработчике сигнала небезопасен (реентранси) —
+		// откладываем на следующий idle в том же GTK-потоке.
+		glib.IdleAdd(func() bool {
+			if txt, e := clipboard.WaitForText(); e == nil {
+				addToHistory(txt)
+			}
+			return false
+		})
+	})
+}
+
+// addToHistory кладёт запись наверх истории (дедуп, лимит). Только текст, в памяти.
+func addToHistory(s string) {
+	if strings.TrimSpace(s) == "" {
+		return
+	}
+	for i, e := range history { // дедуп: убрать старую позицию такой же записи
+		if e == s {
+			history = append(history[:i], history[i+1:]...)
+			break
+		}
+	}
+	history = append([]string{s}, history...) // свежее — сверху
+	if len(history) > maxHistory {
+		history = history[:maxHistory]
+	}
+	log.Printf("history: %d записей", len(history))
 }
 
 // ---------- попап ----------
@@ -211,24 +466,34 @@ func showPopup() {
 	addClass(header, "clip-header")
 	outer.PackStart(header, false, false, 0)
 
-	listBox, _ = gtk.ListBoxNew()
-	listBox.SetSelectionMode(gtk.SELECTION_BROWSE)
-	for _, it := range items {
-		lbl, _ := gtk.LabelNew(displayText(it))
-		lbl.SetXAlign(0)
-		lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
-		lbl.SetVAlign(gtk.ALIGN_FILL)
-		lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
-		lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
-		lbl.SetMaxWidthChars(42)
-		listBox.Add(lbl)
-	}
+	if len(history) == 0 {
+		ph, _ := gtk.LabelNew("Пусто.\nСкопируйте что-нибудь (Ctrl+C).")
+		ph.SetJustify(gtk.JUSTIFY_CENTER)
+		ph.SetHAlign(gtk.ALIGN_CENTER)
+		ph.SetVAlign(gtk.ALIGN_CENTER)
+		ph.SetSizeRequest(listW, 120)
+		addClass(ph, "clip-empty")
+		outer.PackStart(ph, true, true, 0)
+	} else {
+		listBox, _ = gtk.ListBoxNew()
+		listBox.SetSelectionMode(gtk.SELECTION_BROWSE)
+		for _, it := range history {
+			lbl, _ := gtk.LabelNew(displayText(it))
+			lbl.SetXAlign(0)
+			lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
+			lbl.SetVAlign(gtk.ALIGN_FILL)
+			lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
+			lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
+			lbl.SetMaxWidthChars(42)
+			listBox.Add(lbl)
+		}
 
-	scrolled, _ = gtk.ScrolledWindowNew(nil, nil)
-	scrolled.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
-	scrolled.SetSizeRequest(listW, 285) // видимая часть — ~3.5 записи
-	scrolled.Add(listBox)
-	outer.PackStart(scrolled, true, true, 0)
+		scrolled, _ = gtk.ScrolledWindowNew(nil, nil)
+		scrolled.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
+		scrolled.SetSizeRequest(listW, 285) // видимая часть — ~3.5 записи
+		scrolled.Add(listBox)
+		outer.PackStart(scrolled, true, true, 0)
+	}
 
 	w.Add(outer)
 
@@ -239,7 +504,7 @@ func showPopup() {
 	win = w
 	selIdx = 0
 	updateSelection()
-	log.Printf("popup показан в (%d,%d), target=%d, записей=%d", x, y, targetWin, len(items))
+	log.Printf("popup показан в (%d,%d), target=%d, записей=%d", x, y, targetWin, len(history))
 
 	grabTries = 0
 	tryGrab()
@@ -265,8 +530,8 @@ func setSel(i int) {
 	if i < 0 {
 		i = 0
 	}
-	if i > len(items)-1 {
-		i = len(items) - 1
+	if i > len(history)-1 {
+		i = len(history) - 1
 	}
 	if i != selIdx {
 		selIdx = i
@@ -341,7 +606,7 @@ func startKeyPoll() {
 			case "Home":
 				setSel(0)
 			case "End":
-				setSel(len(items) - 1)
+				setSel(len(history) - 1)
 			case "Return", "KP_Enter":
 				finish(true)
 			case "Escape":
@@ -364,8 +629,8 @@ func finish(paste bool) {
 	xproto.UngrabKeyboard(X.Conn(), xproto.TimeCurrentTime)
 
 	text := ""
-	if paste && selIdx >= 0 && selIdx < len(items) {
-		text = items[selIdx]
+	if paste && selIdx >= 0 && selIdx < len(history) {
+		text = history[selIdx]
 	}
 	w.Destroy()
 	listBox = nil
@@ -405,12 +670,9 @@ func isTermClass(s string) bool {
 }
 
 func setClipboard(s string) {
-	clip, err := gtk.ClipboardGet(gdk.SELECTION_CLIPBOARD)
-	if err != nil {
-		log.Println("clipboard:", err)
-		return
+	if clipboard != nil {
+		clipboard.SetText(s)
 	}
-	clip.SetText(s)
 }
 
 // pasteInto шлёт Ctrl+V (или Ctrl+Shift+V для терминалов) через XTEST,
@@ -526,7 +788,7 @@ func clampToScreen(x, y int) (int, int) {
 
 // displayText приводит запись РОВНО к 3 строкам: длинные обрезает (с «…»),
 // короткие дополняет пустыми строками. Тогда высота каждого элемента одинаковая
-// и равна ровно 3 строкам (полный текст храним в items и вставляем целиком).
+// и равна ровно 3 строкам (полный текст храним в history и вставляем целиком).
 func displayText(s string) string {
 	lines := strings.Split(s, "\n")
 	if len(lines) > 3 {
@@ -544,42 +806,4 @@ func sockPath() string {
 		dir = "/tmp"
 	}
 	return filepath.Join(dir, "clipmgr.sock")
-}
-
-// ---------- статичные данные (строки 1..10 вперемешку) ----------
-
-func clipItems() []string {
-	return []string{
-		// 3 строки
-		"ул. Пушкина, д. 10, кв. 5\nМосква, 101000\nРоссия",
-		// 10 очень длинных строк
-		"Строка 1: очень длинный текст, который заведомо шире окна и должен переноситься либо обрезаться — abcdefghijklmnopqrstuvwxyz 0123456789\n" +
-			"Строка 2: ещё одна длиннющая строка про clipboard-историю, которую целиком в попап не влезть никак, поэтому увидим только начало\n" +
-			"Строка 3: lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua\n" +
-			"Строка 4: /home/tihonove/projects/clipmgr/very/deep/nested/path/that/keeps/going/and/going/until/it/overflows/the/window/edge.txt\n" +
-			"Строка 5: SELECT * FROM clips WHERE content LIKE '%очень длинная строка для проверки переноса и обрезки в списке истории%' LIMIT 1000\n" +
-			"Строка 6: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
-			"Строка 7: https://example.com/very/long/url?with=lots&of=query&parameters=that&make=it&super=long&and=unwieldy&indeed=true\n" +
-			"Строка 8: восьмая строка, тоже намеренно длинная, чтобы проверить, что высота элемента остаётся ровно три строки в списке\n" +
-			"Строка 9: девятая строка с кучей текста для наглядности переноса и обрезки длинного многострочного содержимого буфера\n" +
-			"Строка 10: и наконец десятая, финальная длинная строка этого большого элемента истории буфера обмена — конец",
-		// 1 строка
-		"https://github.com/tihonove/clipmgr",
-		// 7 строк
-		"func popupXY() (int, int) {\n\tmouseX, mouseY := 0, 0\n\tif p, err := QueryPointer(); err == nil {\n\t\tmouseX, mouseY = p.X, p.Y\n\t}\n\treturn clampToScreen(mouseX, mouseY)\n}",
-		// 2 строки
-		"API_KEY=sk-9f2a3b7c1d4e5f6a7b8c9d0e\nENDPOINT=https://api.example.com/v1",
-		// 10 строк
-		"{\n  \"id\": 42,\n  \"name\": \"clipmgr\",\n  \"tags\": [\"go\", \"gtk\", \"x11\"],\n  \"active\": true,\n  \"count\": 10,\n  \"owner\": \"tihonove\",\n  \"created\": \"2026-07-03\",\n  \"nested\": { \"a\": 1 }\n}",
-		// 5 строк
-		"cd ~/projects/clipmgr\ngo build -o clipmgr .\npkill clipmgr\nsetsid ./clipmgr &\ntail -f /tmp/clipmgr.log",
-		// 9 строк
-		"[Desktop Entry]\nType=Application\nName=clipmgr\nComment=Clipboard history daemon\nExec=/home/tihonove/projects/clipmgr/clipmgr\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\nTerminal=false\nCategories=Utility;",
-		// 4 строки
-		"С уважением,\nЕвгений Тихонов\ntihonov.ea@gmail.com\n+7 900 000-00-00",
-		// 8 строк
-		"## TODO\n- [x] хоткей через GNOME\n- [x] демон + сокет\n- [x] тема Yaru\n- [ ] история буфера\n- [ ] иконки картинок\n- [ ] инсталлятор\n- [ ] терминал-aware вставка",
-		// 6 строк
-		"SELECT id, name, created\nFROM clips\nWHERE owner = 'tihonove'\n  AND active = true\nORDER BY created DESC\nLIMIT 10;",
-	}
 }
