@@ -81,6 +81,7 @@ var (
 	vKey     xproto.Keycode
 	shiftKey xproto.Keycode
 	spareKey xproto.Keycode // запасной keycode для layout-независимой вставки
+	spareKPK byte           // keysyms-per-keycode сервера (глобальное)
 
 	win            *gtk.Window
 	listBox        *gtk.ListBox
@@ -441,6 +442,7 @@ func showPopup() {
 	if win != nil {
 		return
 	}
+	setupSpareKey() // пока попап открыт: 'v' на запасном keycode (приложения успеют подхватить keymap)
 	if tw, err := ewmh.ActiveWindowGet(X); err == nil {
 		targetWin = tw
 	}
@@ -661,9 +663,21 @@ func finish(paste bool) {
 		setClipboard(text)
 		pasteInto(isTerminal(targetWin)) // терминалам — Ctrl+Shift+V, остальным — Ctrl+V
 	}
+
+	// Вернуть запасной keycode в NoSymbol (иначе mutter резолвит Super+V на него).
+	// С задержкой — чтобы приложения успели обработать нажатие вставки; и только
+	// если попап не открыли снова.
+	glib.TimeoutAdd(300, func() bool {
+		if win == nil {
+			restoreSpareKey()
+		}
+		return false
+	})
 }
 
-// isTerminal определяет, что целевое окно — терминал (по WM_CLASS).
+// isTerminal определяет, что целевое окно — терминал (по WM_CLASS). Нужно, чтобы
+// выбрать комбинацию вставки: терминалы вставляют по Ctrl+Shift+V, а обычные
+// GUI-поля — по Ctrl+V.
 func isTerminal(w xproto.Window) bool {
 	if w == 0 {
 		return false
@@ -689,24 +703,80 @@ func isTermClass(s string) bool {
 	return false
 }
 
+// setClipboard делает демона владельцем CLIPBOARD с текстом s. Пока демон жив, он
+// сам обслуживает запросы вставки — поэтому внешний xsel/xclip не нужен.
 func setClipboard(s string) {
 	if clipboard != nil {
 		clipboard.SetText(s)
 	}
 }
 
-// pasteInto шлёт Ctrl+V (или Ctrl+Shift+V для терминалов) через XTEST,
-// НЕ завися от активной раскладки: временно мапит запасной keycode на keysym 'v'
-// (как это делает xdotool), шлёт его, затем возвращает мэппинг.
+// --- Вставка выбранной записи, независимая от раскладки ---
+//
+// Задача: синтезировать Ctrl+V (Ctrl+Shift+V для терминалов) так, чтобы вставили
+// ЛЮБЫЕ приложения (GTK/Qt/Electron/терминалы) при ЛЮБОЙ активной раскладке
+// (у пользователя us,ru,us). Наивный XTEST реального keycode 'v' в русской группе
+// даёт «м» — на этой физической клавише кириллица.
+//
+// Решение (как в xdotool, но нативно и потому быстро, ~единицы мс): держим
+// ЗАПАСНОЙ неиспользуемый keycode, замапленный на 'v'/'V' во ВСЕХ группах, и шлём
+// именно его — тогда в любой группе на нём выходит 'v'. Реальную клавишу 'v' слать
+// нельзя: терминалы (kitty) ведут активную группу сами и в русской видят «м».
+//
+// Три тонкости, без которых ломается:
+//  1. Запасной keycode мапим ТОЛЬКО пока попап открыт (setupSpareKey в showPopup),
+//     а после закрытия возвращаем в NoSymbol (restoreSpareKey, см. finish). Если
+//     держать 'v' на нём постоянно, mutter резолвит горячую клавишу Super+V именно
+//     на этот keycode (в русской раскладке 'v' больше нигде нет) → физический
+//     Super+V перестаёт открывать попап. Пока попап открыт, клавиатура и так
+//     захвачена, так что Super+V в это время не нужен.
+//  2. Мапим при ОТКРЫТИИ попапа (не в момент нажатия Enter), чтобы приложения
+//     успели асинхронно перечитать keymap до нажатия — иначе гонка: приложение
+//     обработает нажатие со старым keymap и не увидит 'v'.
+//  3. Возврат мэппинга — с задержкой после закрытия (см. finish), т.к. Qt/Electron
+//     читают событие клавиши асинхронно: вернёшь сразу — увидят уже NoSymbol.
+
+// setupSpareKey мапит запасной keycode на 'v'/'V' во всех группах раскладки
+// (см. блок выше). keysymsPerKeycode берём серверный (spareKPK), иначе смещение
+// групп ломается и в русской раскладке выходит «м».
+func setupSpareKey() {
+	if spareKey == 0 {
+		return
+	}
+	n := int(spareKPK)
+	if n < 6 {
+		n = 6
+	}
+	ks := make([]xproto.Keysym, n)
+	for i := 0; i+1 < n; i += 2 {
+		ks[i], ks[i+1] = 0x0076, 0x0056 // каждая группа: [v, V]
+	}
+	xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, byte(n), ks)
+	xsync()
+}
+
+// restoreSpareKey возвращает запасной keycode в NoSymbol — иначе mutter резолвит
+// на него Super+V и хоткей перестаёт работать (см. тонкость 1 выше).
+func restoreSpareKey() {
+	if spareKey == 0 {
+		return
+	}
+	n := int(spareKPK)
+	if n < 1 {
+		n = 1
+	}
+	ks := make([]xproto.Keysym, n) // все NoSymbol
+	xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, byte(n), ks)
+	xsync()
+}
+
+// pasteInto синтезирует Ctrl+V (Ctrl+Shift+V для терминалов) через XTEST,
+// используя запасной keycode (замаплен на 'v' во всех группах в setupSpareKey).
 func pasteInto(term bool) {
 	v := vKey
 	if spareKey != 0 {
-		// firstKeycode=spareKey, keysymsPerKeycode=2 → уровень0='v'(0x76), уровень1='V'(0x56)
-		xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, 2, []xproto.Keysym{0x0076, 0x0056})
-		xsync()
-		v = spareKey
+		v = spareKey // 'v' в любой группе → раскладко-независимо
 	}
-
 	fakeKey(true, ctrlKey)
 	if term {
 		fakeKey(true, shiftKey)
@@ -718,15 +788,12 @@ func pasteInto(term bool) {
 	}
 	fakeKey(false, ctrlKey)
 	xsync()
-
-	if spareKey != 0 {
-		xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, 2, []xproto.Keysym{0, 0}) // вернуть NoSymbol
-		xsync()
-	}
 }
 
-// findSpareKeycode ищет неиспользуемый keycode (все keysym = 0), который можно
-// временно перемапливать под вставку.
+// findSpareKeycode ищет неиспользуемый keycode (во всех группах NoSymbol), который
+// можно временно занять под 'v' для вставки. Заодно запоминает серверный
+// keysyms-per-keycode в spareKPK. Возвращает 0, если свободного нет (тогда
+// вставка откатится на реальный keycode 'v' — с оговоркой про русскую раскладку).
 func findSpareKeycode() xproto.Keycode {
 	setup := xproto.Setup(X.Conn())
 	minKc, maxKc := int(setup.MinKeycode), int(setup.MaxKeycode)
@@ -734,6 +801,7 @@ func findSpareKeycode() xproto.Keycode {
 	if err != nil {
 		return 0
 	}
+	spareKPK = m.KeysymsPerKeycode
 	per := int(m.KeysymsPerKeycode)
 	for kc := maxKc; kc >= minKc; kc-- {
 		base := (kc - minKc) * per
@@ -756,6 +824,8 @@ func xsync() {
 	xproto.GetInputFocus(X.Conn()).Reply()
 }
 
+// fakeKey синтезирует нажатие/отпускание клавиши через XTEST (реальный ввод,
+// а не SendEvent — приложения его принимают).
 func fakeKey(press bool, code xproto.Keycode) {
 	t := byte(xproto.KeyRelease)
 	if press {
