@@ -508,7 +508,6 @@ func showPopup() {
 	popupX, popupY = x, y
 	selIdx = 0
 	updateSelection()
-	log.Printf("popup показан в (%d,%d), target=%d, записей=%d", x, y, targetWin, len(history))
 
 	grabTries = 0
 	tryGrab()
@@ -599,7 +598,7 @@ func tryGrab() {
 }
 
 func startKeyPoll() {
-	glib.TimeoutAdd(8, func() bool {
+	glib.TimeoutAdd(2, func() bool {
 		if win == nil {
 			return false
 		}
@@ -654,15 +653,18 @@ func finish(paste bool) {
 	if paste && selIdx >= 0 && selIdx < len(history) {
 		text = history[selIdx]
 	}
-	w.Destroy()
-	listBox = nil
-	scrolled = nil
-	xproto.GetInputFocus(X.Conn()).Reply()
+	w.Hide()                               // мгновенно убрать окно с экрана (Destroy — тяжелее, делаем после вставки)
+	xproto.GetInputFocus(X.Conn()).Reply() // дождаться обработки ungrab до вставки
 
 	if paste && text != "" {
 		setClipboard(text)
 		pasteInto(isTerminal(targetWin)) // терминалам — Ctrl+Shift+V, остальным — Ctrl+V
 	}
+	listBox = nil
+	scrolled = nil
+	// Тяжёлый teardown окна — отложенно, чтобы главный цикл сначала отдал буфер
+	// вставляющему приложению (SelectionRequest), а не ждал разрушения виджетов.
+	glib.IdleAdd(func() bool { w.Destroy(); return false })
 
 	// Вернуть запасной keycode в NoSymbol (иначе mutter резолвит Super+V на него).
 	// С задержкой — чтобы приложения успели обработать нажатие вставки; и только
