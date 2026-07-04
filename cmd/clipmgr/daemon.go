@@ -26,6 +26,7 @@ const maxHistory = 100 // сколько записей держим в памя
 
 var (
 	clipboard *gtk.Clipboard // CLIPBOARD: и слушаем, и владеем им при вставке
+	primary   *gtk.Clipboard // PRIMARY: нужен для вставки Shift+Insert в VTE-терминалы (Wayland)
 	history   []string       // история буфера, свежие сверху (только в памяти)
 
 	// Когда мы сами кладём запись в буфер при вставке — не хотим двигать её наверх
@@ -179,6 +180,21 @@ func setClipboard(s string) {
 		selfSetText = s
 		selfSetPending = true
 		clipboard.SetText(s)
+	}
+}
+
+// setPrimary делает демона владельцем PRIMARY с текстом s. Нужно на Wayland: VTE-
+// терминалы по Shift+Insert вставляют именно PRIMARY (а не CLIPBOARD), поэтому без
+// этого в консоль вставлялось бы старое содержимое выделения, а не выбранная запись.
+// PRIMARY мы не мониторим (историю снимаем с CLIPBOARD), так что self-set-метка не нужна.
+func setPrimary(s string) {
+	if primary == nil {
+		if p, err := gtk.ClipboardGet(gdk.SELECTION_PRIMARY); err == nil {
+			primary = p
+		}
+	}
+	if primary != nil {
+		primary.SetText(s)
 	}
 }
 

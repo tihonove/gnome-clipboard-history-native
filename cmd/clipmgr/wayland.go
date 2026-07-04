@@ -228,8 +228,13 @@ func finishWayland(paste bool) {
 	// требует свежий input-serial активной поверхности. Если сделать это после
 	// Destroy (фокус уже ушёл), mutter отклонит установку — и вставится старое
 	// содержимое буфера (баг «всегда один и тот же текст»).
+	//
+	// Кладём и в CLIPBOARD, и в PRIMARY: вставляем через Shift+Insert, а VTE-терминалы
+	// по нему берут PRIMARY, а не CLIPBOARD (GUI-поля берут CLIPBOARD). Без PRIMARY в
+	// консоль вставлялась бы старая мышиная выделенка, а не выбранная запись.
 	if paste && text != "" {
 		setClipboard(text)
+		setPrimary(text)
 	}
 
 	w.Destroy()

@@ -150,8 +150,10 @@ func injectShiftInsert() { combo(keyLeftShift, keyInsert) }
 func injectCtrlV()       { combo(keyLeftCtrl, keyV) }
 
 // InjectPaste выбирает способ вставки на Wayland. По умолчанию Shift+Insert —
-// раскладко-независимо, вставляет CLIPBOARD и в терминалах, и в GUI. Скрытый
-// env-override CLIPMGR_PASTE=ctrlv — на случай приложения, не понимающего Shift+Insert.
+// раскладко-независимо и работает и в терминалах, и в GUI. ВАЖНО: GUI-поля по нему
+// берут CLIPBOARD, а VTE-терминалы — PRIMARY, поэтому вызывающая сторона
+// (finishWayland) кладёт выбранную запись в ОБА селекшна. Скрытый env-override
+// CLIPMGR_PASTE=ctrlv — на случай приложения, не понимающего Shift+Insert.
 func InjectPaste() {
 	if os.Getenv("CLIPMGR_PASTE") == "ctrlv" {
 		injectCtrlV()
