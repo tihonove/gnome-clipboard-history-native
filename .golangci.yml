@@ -1,0 +1,27 @@
+# Конфиг golangci-lint (формат v2). Запуск: golangci-lint run
+version: "2"
+
+linters:
+  # стандартный набор: errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - misspell
+  settings:
+    errcheck:
+      # Fire-and-forget по замыслу: best-effort вызовы, где ошибку
+      # осмысленно обработать нечем (сокетные «звонки», gsettings, X-запросы,
+      # kernel-write в uinput). Reply() у xgb-куки — синхронизирующий round-trip,
+      # результат не нужен.
+      exclude-functions:
+        - (net.Conn).Write
+        - (net.Conn).Close
+        - (*os.File).Close
+        - os.MkdirAll
+        - os.Remove
+        - (*os/exec.Cmd).Run
+        - (github.com/jezek/xgb/xproto.GetInputFocusCookie).Reply
+        - (github.com/jezek/xgb/xfixes.QueryVersionCookie).Reply
+
+formatters:
+  enable:
+    - gofmt

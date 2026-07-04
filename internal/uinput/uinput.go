@@ -105,7 +105,7 @@ func Close() {
 	if uinputFile == nil {
 		return
 	}
-	unix.IoctlSetInt(int(uinputFile.Fd()), uiDevDestroy, 0)
+	_ = unix.IoctlSetInt(int(uinputFile.Fd()), uiDevDestroy, 0) // best-effort teardown
 	uinputFile.Close()
 	uinputFile = nil
 }
@@ -132,17 +132,18 @@ func emit(typ, code uint16, value int32) error {
 func syn() error { return emit(evSyn, synReport, 0) }
 
 // combo эмитит модификатор+клавишу: press mod, press key, syn; release key, release mod, syn.
+// Ошибки записи игнорируем сознательно: середина комбинации — откатывать нечего.
 func combo(mod, key uint16) {
 	if uinputFile == nil {
 		log.Println("uinput недоступен — вставка пропущена")
 		return
 	}
-	emit(evKey, mod, 1)
-	emit(evKey, key, 1)
-	syn()
-	emit(evKey, key, 0)
-	emit(evKey, mod, 0)
-	syn()
+	_ = emit(evKey, mod, 1)
+	_ = emit(evKey, key, 1)
+	_ = syn()
+	_ = emit(evKey, key, 0)
+	_ = emit(evKey, mod, 0)
+	_ = syn()
 }
 
 func injectShiftInsert() { combo(keyLeftShift, keyInsert) }

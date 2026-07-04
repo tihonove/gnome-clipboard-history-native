@@ -22,3 +22,9 @@ jobs:
 
       - run: go vet ./...
       - run: go build ./...
+
+      # Линтер после установки libgtk-3-dev: cgo-тайпчек требует заголовков GTK.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
