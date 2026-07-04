@@ -1,0 +1,37 @@
+# nfpm — сборка .deb из готового бинарника clipmgr-linux-x64.
+# Вся установка (автозапуск, хоткей, системная часть uinput) живёт ВНУТРИ
+# бинарника: postinst просто зовёт `clipmgr --install`, prerm — `--uninstall`.
+# Версия берётся из env VERSION (в CI — тег без ведущей v).
+# Док: https://nfpm.goreleaser.com/configuration/
+name: clipmgr
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+section: utils
+priority: optional
+maintainer: Eugene Tihonov <tihonov.ea@gmail.com>
+homepage: https://github.com/tihonove/gnome-clipboard-history-native
+license: TODO
+description: |
+  Clipboard history (Win+V) for GNOME on X11 and Wayland.
+  TODO: развёрнутое описание для магазина/репозитория.
+
+# Рантайм-зависимости. GTK3 — для попапа; gsettings (libglib2.0-bin) — чтобы
+# --install мог прописать custom-keybinding. XWayland нужен только для истории
+# буфера под Wayland — поэтому recommends, а не depends (на X11 не обязателен).
+depends:
+  - libgtk-3-0
+  - libglib2.0-bin
+recommends:
+  - xwayland
+
+contents:
+  - src: ./clipmgr-linux-x64
+    dst: /usr/bin/clipmgr
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: ./packaging/scripts/postinstall.sh
+  preremove: ./packaging/scripts/preremove.sh

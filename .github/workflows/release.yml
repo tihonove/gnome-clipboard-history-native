@@ -1,7 +1,8 @@
 name: Release
 
 # Релиз по пушу тега vX.Y.Z (тег обычно создаёт bump-version.yml):
-# собрать бинарник, сгенерировать changelog (git-cliff) и выложить GitHub Release.
+# собрать бинарник, упаковать .deb, сгенерировать changelog (git-cliff),
+# выложить GitHub Release и опубликовать apt-репозиторий на gh-pages.
 on:
   push:
     tags:
@@ -16,8 +17,43 @@ jobs:
     with:
       version: ${{ github.ref_name }} # vX.Y.Z; build.yml срежет ведущую v
 
-  release:
+  # Собрать .deb из готового бинарника (nfpm). Вся установка — внутри бинарника
+  # (postinst зовёт `clipmgr --install`), пакет только раскладывает файл.
+  package:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: clipmgr-linux-x64 # → ./clipmgr-linux-x64 (nfpm.yaml ждёт его тут)
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Build .deb
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}" # тег без ведущей v → semver
+          "$(go env GOPATH)/bin/nfpm" pkg \
+            --config packaging/nfpm.yaml \
+            --packager deb \
+            --target "clipmgr_${VERSION}_amd64.deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipmgr-deb
+          path: "*.deb"
+          if-no-files-found: error
+
+  # GitHub Release: бинарник + .deb + changelog за последний тег.
+  release:
+    needs: [build, package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +73,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true
+          merge-multiple: true # бинарник + .deb в одну папку
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -45,3 +81,65 @@ jobs:
           name: clipmgr ${{ github.ref_name }}
           body: ${{ steps.cliff.outputs.content }}
           files: artifacts/*
+
+  # Опубликовать .deb в apt-репозиторий на ветке gh-pages (reprepro + подпись).
+  # Ветка gh-pages — персистентное состояние репозитория (pool/db/dists копятся).
+  apt-repo:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # main: шаблоны из packaging/apt
+
+      - name: Download .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: clipmgr-deb
+          path: debs
+
+      - name: Install reprepro
+        run: sudo apt-get update && sudo apt-get install -y reprepro
+
+      - name: Import signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
+            echo "::error::secret APT_GPG_PRIVATE_KEY не задан — репозиторий не подписать." >&2
+            exit 1
+          fi
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          echo "FPR=$FPR" >> "$GITHUB_ENV"
+
+      - name: Assemble & sign repository
+        run: |
+          # Забрать текущее дерево репозитория (первый релиз — создать пустое).
+          if git clone --depth 1 --branch gh-pages \
+               "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" pages; then
+            echo "gh-pages подтянут"
+          else
+            echo "gh-pages нет — инициализирую"
+            mkdir pages && (cd pages && git init -b gh-pages)
+          fi
+
+          # conf/distributions с реальным fingerprint подписи.
+          mkdir -p pages/conf
+          sed "s/__FINGERPRINT__/${FPR}/" packaging/apt/conf/distributions > pages/conf/distributions
+
+          # Статика: установщик, landing, публичный ключ (экспорт из secret).
+          cp packaging/apt/install.sh packaging/apt/index.html pages/
+          gpg --export "${FPR}" > pages/clipmgr-archive-keyring.gpg
+
+          # Добавить пакет в компонент stable/main (подпись Release автоматом).
+          reprepro -b pages includedeb stable debs/*.deb
+          reprepro -b pages list stable
+
+      - name: Publish gh-pages
+        run: |
+          cd pages
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="github-actions[bot]@users.noreply.github.com" \
+              commit -m "apt: publish ${GITHUB_REF_NAME}"
+          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" \
+              HEAD:gh-pages
