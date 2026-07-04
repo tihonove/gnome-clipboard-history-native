@@ -49,7 +49,8 @@ func runDaemon() {
 		// uinput-устройство (см. internal/uinput). История — через XWayland-мост
 		// (startClipboardWatchWayland в wayland.go).
 		if err := uinput.Init(); err != nil {
-			log.Printf("uinput недоступен (%v). Проверь права на /dev/uinput. Вставка работать не будет.", err)
+			log.Printf("uinput недоступен (%v). Вставка на Wayland отключена — "+
+				"выполните один раз: clipmgr --setup-input", err)
 		}
 	} else {
 		var err error

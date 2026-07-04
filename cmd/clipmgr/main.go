@@ -33,6 +33,22 @@ func main() {
 		case "--uninstall":
 			runUninstall()
 			return
+		case "--setup-input":
+			runSetupInput()
+			return
+		case "--remove-input":
+			runRemoveInput()
+			return
+		case "__setup-input-root": // скрытый: привилегированная часть (через pkexec/sudo)
+			if len(os.Args) < 3 {
+				runSetupInputPrivileged("")
+			} else {
+				runSetupInputPrivileged(os.Args[2])
+			}
+			return
+		case "__remove-input-root": // скрытый: привилегированная часть
+			runRemoveInputPrivileged()
+			return
 		case "--version", "-v":
 			fmt.Println("clipmgr", version)
 			return
@@ -41,12 +57,15 @@ func main() {
 				"  clipmgr             запустить демона\n" +
 				"  clipmgr --install   прописать автозапуск и хоткей Super+Ctrl+V, запустить демона\n" +
 				"  clipmgr --uninstall убрать автозапуск и хоткей\n" +
+				"  clipmgr --setup-input  один раз настроить доступ к /dev/uinput для вставки (Wayland)\n" +
+				"  clipmgr --remove-input убрать udev-правило /dev/uinput\n" +
 				"  clipmgr --show      показать попап (вызывается хоткеем)\n" +
 				"  clipmgr --version   версия\n" +
 				"\n" +
 				"Wayland (GNOME): попап по центру, вставка через /dev/uinput (Shift+Insert),\n" +
 				"история — через XWayland-мост (mutter зеркалит буфер в X11 CLIPBOARD).\n" +
-				"  * нужен доступ на запись к /dev/uinput (иначе udev-правило);\n" +
+				"  * доступ к /dev/uinput настраивается автоматически при --install\n" +
+				"    (или отдельно: clipmgr --setup-input; .deb кладёт udev-правило сам);\n" +
 				"  * для истории нужен XWayland (обычно уже включён);\n" +
 				"  * переключение раскладки настроить через GNOME Tweaks (не Settings),\n" +
 				"    иначе модификаторы «съедаются» и хоткей/вставка ломаются на 2-й раскладке.")

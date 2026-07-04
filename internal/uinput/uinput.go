@@ -42,7 +42,15 @@ const (
 	uiDevDestroy = 0x5502     // UI_DEV_DESTROY
 )
 
+// DevPath — путь к устройству ядра для инъекции ввода.
+const DevPath = "/dev/uinput"
+
 var uinputFile *os.File
+
+// HasAccess сообщает, есть ли право записи в /dev/uinput (узел существует и W_OK).
+// false также если модуль uinput не загружен (узла нет) — это тоже трактуем как
+// «нужна настройка» (см. clipmgr --setup-input).
+func HasAccess() bool { return unix.Access(DevPath, unix.W_OK) == nil }
 
 // uinputUserDev — struct uinput_user_dev из linux/uinput.h (legacy-путь создания).
 type uinputUserDev struct {
@@ -57,9 +65,9 @@ type uinputUserDev struct {
 
 // Init открывает /dev/uinput, регистрирует нужные клавиши и создаёт устройство.
 func Init() error {
-	f, err := os.OpenFile("/dev/uinput", os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	f, err := os.OpenFile(DevPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("open /dev/uinput: %w", err)
+		return fmt.Errorf("open %s: %w", DevPath, err)
 	}
 	fd := int(f.Fd())
 

@@ -24,14 +24,19 @@
 
 - **X11**: XTEST-инжект и override-redirect окна.
 - **Wayland (GNOME)**: попап — обычный toplevel (получает фокус), вставка — через
-  `/dev/uinput` (нужен доступ на запись; иначе udev-правило). Переключение раскладки
-  настраивать через **GNOME Tweaks** (не Settings), иначе модификаторы «съедаются» и
-  хоткей/вставка ломаются на 2-й раскладке.
+  `/dev/uinput` (нужен доступ на запись). Доступ настраивается **автоматически**:
+  `--install` на Wayland ставит udev-правило (эскалация pkexec/sudo), либо отдельно
+  `clipmgr --setup-input`; `.deb`/`.rpm` кладут то же правило сами (postinst под root).
+  Правило комбинированное — `uaccess` (мгновенный ACL активному юзеру, без релогина) +
+  `GROUP=input` как fallback. Единый источник текста правила — `uinput_setup.go`. См.
+  `cmd/clipmgr/uinput_setup.go`. Переключение раскладки настраивать через **GNOME
+  Tweaks** (не Settings), иначе модификаторы «съедаются» и хоткей/вставка ломаются на
+  2-й раскладке.
 - **GNOME (mutter)**: горячая клавиша вешается через сам GNOME (gsettings custom
   keybinding), т.к. mutter держит `Super` и приложение не может перехватить его
   через XGrabKey. Работает и на X11, и на Wayland.
 - Сборка: **Go 1.23+**, **cgo**, `libgtk-3-dev`. Рантайм: GTK3; на X11 — X-сервер с
-  XTEST, на Wayland — доступ к `/dev/uinput`.
+  XTEST, на Wayland — доступ к `/dev/uinput` (см. выше про авто-настройку).
 
 ## Сборка и dev-цикл
 
@@ -78,8 +83,11 @@ xsel -ob        # проверить, что в буфер попал текст
     запасной keycode, позиционирование;
   - `wayland.go` — **Wayland-бэкенд**: `isWayland()`, `showPopupWayland()`,
     `finishWayland()`, XWayland-мост истории.
+  - `uinput_setup.go` — единоразовая настройка доступа к `/dev/uinput`
+    (`--setup-input`/`--remove-input`): udev-правило + эскалация pkexec/sudo через
+    ре-экзек своего же бинарника (скрытые `__setup-input-root`/`__remove-input-root`).
 - `internal/uinput/` — виртуальная клавиатура через `/dev/uinput` (вставка на
-  Wayland): `Init()`, `Close()`, `InjectPaste()`.
+  Wayland): `Init()`, `Close()`, `InjectPaste()`, `HasAccess()`, `DevPath`.
 - `.golangci.yml` — конфиг golangci-lint (гоняется в CI; намеренные
   fire-and-forget вызовы исключены точечно — см. комментарии в конфиге).
 
@@ -124,6 +132,13 @@ xsel -ob        # проверить, что в буфер попал текст
   выделенка, а не выбранная запись. Детект окна под Wayland не нужен (и невозможен).
   Устройство создаём один раз при старте демона и переиспользуем (см. комментарий в
   `internal/uinput`). Env-override `CLIPMGR_PASTE=ctrlv`.
+- **Доступ к `/dev/uinput` — единоразовая привилегированная настройка** (`uinput_setup.go`),
+  НЕ каждая вставка. Проверяй `uinput.HasAccess()` перед эскалацией — если доступ уже
+  есть (напр. `.deb` положил правило, или узел world-writable), sudo/pkexec НЕ дёргать.
+  `--install` на Wayland настраивает сам, но только если `!HasAccess() && !ruleInstalled()`.
+  Привилегированную запись делает ре-экзек своего же бинарника (скрытый сабкоманд), а не
+  shell-heredoc. Wayland по дизайну запрещает инжект в чужие окна — это цена, как у CopyQ
+  (тот же `/dev/uinput` через ydotool); zero-setup-пути без udev-правила нет.
 - **История — через XWayland-мост** (`startClipboardWatchWayland`). Фоновый wl-путь
   чужой буфер не видит (нет `data-control`), поэтому мониторим X11 CLIPBOARD, куда
   mutter зеркалит буфер: отдельное xgb-соединение к XWayland, XFIXES-уведомления о

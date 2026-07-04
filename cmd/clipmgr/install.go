@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/tihonove/gnome-clipboard-history-native/internal/uinput"
 )
 
 const (
@@ -25,16 +27,17 @@ const (
 // runInstall прописывает автозапуск и горячую клавишу на текущий путь бинарника
 // и запускает демона. Идемпотентно — можно запускать повторно.
 func runInstall() {
-	exe, err := os.Executable()
-	if err != nil {
-		log.Fatalf("не могу определить путь бинарника: %v", err)
-	}
-	if resolved, e := filepath.EvalSymlinks(exe); e == nil {
-		exe = resolved
-	}
+	exe := resolveExe()
 	installAutostart(exe)
 	installHotkey(exe)
 	startDaemon(exe)
+	// Wayland: вставка идёт через /dev/uinput. Если доступа нет и правило ещё не
+	// положено пакетом — настраиваем один раз (runSetupInput сам эскалируется и
+	// перезапускает демона). На X11 uinput не нужен.
+	if isWayland() && !uinput.HasAccess() && !ruleInstalled() {
+		fmt.Println("\nWayland: для вставки нужен доступ к /dev/uinput — настраиваю (один раз)…")
+		runSetupInput()
+	}
 	fmt.Println("Готово. clipmgr в автозапуске, Super+Ctrl+V настроен, демон запущен.")
 }
 
@@ -47,6 +50,10 @@ func runUninstall() {
 		c.Write([]byte("quit\n"))
 		c.Close()
 		fmt.Println("демон остановлен")
+	}
+	if ruleInstalled() {
+		fmt.Println("udev-правило /dev/uinput оставлено (могло понадобиться другим). " +
+			"Чтобы убрать: clipmgr --remove-input")
 	}
 	fmt.Println("Готово. clipmgr убран из автозапуска и хоткеев.")
 }
