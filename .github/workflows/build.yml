@@ -44,7 +44,7 @@ jobs:
         run: |
           go build -trimpath \
             -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
-            -o clipmgr-linux-x64 .
+            -o clipmgr-linux-x64 ./cmd/clipmgr
 
       - uses: actions/upload-artifact@v4
         with:

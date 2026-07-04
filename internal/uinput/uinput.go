@@ -1,13 +1,15 @@
-// uinput.go — инъекция клавиш через собственное виртуальное клавиатурное
+//go:build linux
+
+// Package uinput — инъекция клавиш через собственное виртуальное клавиатурное
 // устройство /dev/uinput. Используется ТОЛЬКО на Wayland-бэкенде: под нативным
 // Wayland XTEST не действует, а kernel-level ввод через uinput доходит и до
 // нативных Wayland-окон, и до XWayland, и до консоли.
 //
-// Устройство создаём один раз при старте демона (initUinput) и переиспользуем на
+// Устройство создаём один раз при старте демона (Init) и переиспользуем на
 // каждую вставку — это убирает латентность создания и гонку «udev/libinput ещё не
 // подхватил устройство» (ровно поэтому у ydotool демон долгоживущий). Требует прав
 // на запись в /dev/uinput (иначе udev-правило).
-package main
+package uinput
 
 import (
 	"encoding/binary"
@@ -53,8 +55,8 @@ type uinputUserDev struct {
 	Absflat      [64]int32
 }
 
-// initUinput открывает /dev/uinput, регистрирует нужные клавиши и создаёт устройство.
-func initUinput() error {
+// Init открывает /dev/uinput, регистрирует нужные клавиши и создаёт устройство.
+func Init() error {
 	f, err := os.OpenFile("/dev/uinput", os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return fmt.Errorf("open /dev/uinput: %w", err)
@@ -98,7 +100,8 @@ func initUinput() error {
 	return nil
 }
 
-func closeUinput() {
+// Close уничтожает виртуальное устройство. No-op, если Init не вызывался (X11).
+func Close() {
 	if uinputFile == nil {
 		return
 	}
@@ -145,10 +148,10 @@ func combo(mod, key uint16) {
 func injectShiftInsert() { combo(keyLeftShift, keyInsert) }
 func injectCtrlV()       { combo(keyLeftCtrl, keyV) }
 
-// injectPaste выбирает способ вставки на Wayland. По умолчанию Shift+Insert —
+// InjectPaste выбирает способ вставки на Wayland. По умолчанию Shift+Insert —
 // раскладко-независимо, вставляет CLIPBOARD и в терминалах, и в GUI. Скрытый
 // env-override CLIPMGR_PASTE=ctrlv — на случай приложения, не понимающего Shift+Insert.
-func injectPaste() {
+func InjectPaste() {
 	if os.Getenv("CLIPMGR_PASTE") == "ctrlv" {
 		injectCtrlV()
 		return

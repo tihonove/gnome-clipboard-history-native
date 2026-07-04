@@ -1,6 +1,8 @@
+//go:build linux
+
 // wayland.go — Wayland-бэкенд попапа и вставки (для GNOME Wayland).
 //
-// Отличия от X11-пути (main.go) сведены к минимуму — переиспользуем общий каркас
+// Отличия от X11-пути (x11.go) сведены к минимуму — переиспользуем общий каркас
 // (buildPopupBox, setClipboard, история, CSS, сокет/демон). Специфика Wayland:
 //   - Попап — обычный GTK_WINDOW_TOPLEVEL: под Wayland он получает фокус клавиатуры,
 //     поэтому клавиши читаем штатными GTK-сигналами (никакого xgb-грабa root).
@@ -8,8 +10,9 @@
 //     ListBox, перехватываем только Enter/Escape.
 //   - Скрытие при потере фокуса — focus-out-event (клика-мимо через pointer-grab нет).
 //   - Позиция — по центру: задать окну координаты (у курсора) Wayland не даёт.
-//   - Вставка — uinput Shift+Insert (см. uinput.go): раскладко-независимо и универсально
-//     для терминалов и GUI, поэтому детект окна/терминала не нужен (он под Wayland и невозможен).
+//   - Вставка — uinput Shift+Insert (см. internal/uinput): раскладко-независимо и
+//     универсально для терминалов и GUI, поэтому детект окна/терминала не нужен
+//     (он под Wayland и невозможен).
 //   - История — через XWayland-мост (startClipboardWatchWayland): фоновый wl-путь чужой
 //     буфер не видит (нет data-control), но mutter зеркалит буфер в X11 CLIPBOARD, и мы
 //     ловим XFIXES-уведомления и читаем селекшн in-process по xgb (как это делает CopyQ).
@@ -27,6 +30,8 @@ import (
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xfixes"
 	"github.com/jezek/xgb/xproto"
+
+	"github.com/tihonove/gnome-clipboard-history-native/internal/uinput"
 )
 
 const wlPasteDelayMs = 120 // дать фокусу вернуться на прежнее окно перед инъекцией
@@ -231,7 +236,7 @@ func finishWayland(paste bool) {
 
 	if paste && text != "" {
 		glib.TimeoutAdd(wlPasteDelayMs, func() bool {
-			injectPaste()
+			uinput.InjectPaste()
 			return false
 		})
 	}

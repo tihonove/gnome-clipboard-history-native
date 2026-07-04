@@ -1,4 +1,4 @@
-module clipmgr
+module github.com/tihonove/gnome-clipboard-history-native
 
 go 1.23
 
