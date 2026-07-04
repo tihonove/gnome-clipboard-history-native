@@ -1,29 +1,25 @@
-<!-- Landing apt-репозитория (отдаётся с GitHub Pages, корень сайта).
-     Тексты — плейсхолдеры, причешем позже. -->
+<!-- Корень gh-pages отдаёт apt-репозиторий (dists/, pool/, ключ, install.sh).
+     Человеческий лендинг — это README на GitHub, поэтому эта страница просто
+     уводит туда, чтобы корень хоста не выглядел пустым/заброшенным. -->
+<!doctype html>
+<html lang="en">
 <meta charset="utf-8">
-<title>clipmgr — apt repository</title>
+<title>clipmgr</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="0; url=https://github.com/tihonove/gnome-clipboard-history-native">
+<link rel="canonical" href="https://github.com/tihonove/gnome-clipboard-history-native">
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-  code, pre { background: #f4f4f4; border-radius: 4px; }
-  pre { padding: 1rem; overflow-x: auto; }
-  code { padding: .1rem .3rem; }
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, sans-serif; line-height: 1.6;
+    display: grid; place-content: center; gap: .5rem;
+    min-height: 100vh; margin: 0; padding: 1rem; text-align: center;
+  }
+  a { color: #3584e4; }
+  .muted { opacity: .6; font-size: .9rem; }
 </style>
 
 <h1>clipmgr</h1>
-<p>Clipboard history (Win+V) for GNOME (X11 + Wayland). <em>TODO: описание.</em></p>
-
-<h2>Быстрая установка (apt, с автообновлениями)</h2>
-<pre><code>curl -fsSL https://tihonove.github.io/gnome-clipboard-history-native/install.sh | sh</code></pre>
-
-<h2>Без apt (скачать бинарник)</h2>
-<pre><code>curl -fsSL https://tihonove.github.io/gnome-clipboard-history-native/install-standalone.sh | sh</code></pre>
-
-<h2>Или вручную (apt)</h2>
-<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://tihonove.github.io/gnome-clipboard-history-native/clipmgr-archive-keyring.gpg \
-  | sudo tee /etc/apt/keyrings/clipmgr.gpg >/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/clipmgr.gpg] https://tihonove.github.io/gnome-clipboard-history-native stable main" \
-  | sudo tee /etc/apt/sources.list.d/clipmgr.list >/dev/null
-sudo apt update &amp;&amp; sudo apt install clipmgr</code></pre>
-
-<p><a href="https://github.com/tihonove/gnome-clipboard-history-native">GitHub</a></p>
+<p>Clipboard history (Win+V) for GNOME.</p>
+<p><a href="https://github.com/tihonove/gnome-clipboard-history-native">Opening the project on GitHub…</a></p>
+<p class="muted">This host also serves the apt repository (<code>stable main</code>).</p>
