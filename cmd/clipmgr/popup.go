@@ -37,15 +37,17 @@ window { background-color: transparent; }
 list { background-color: transparent; }
 list row {
   background-color: transparent;
-  border: 2px solid transparent;
+  /* тонкая серая рамка вокруг каждого элемента — чтобы записи не сливались */
+  border: 1px solid alpha(@theme_fg_color, 0.14);
   border-radius: 8px;
   margin: 2px 8px;
   padding: 8px 10px;
   outline: none;
 }
 list row:selected {
+  /* выделенный — акцентом Yaru поверх серой рамки */
   border-color: @theme_selected_bg_color;
-  background-color: alpha(@theme_selected_bg_color, 0.14);
+  background-color: alpha(@theme_selected_bg_color, 0.16);
 }
 .clip-empty {
   padding: 28px 18px;

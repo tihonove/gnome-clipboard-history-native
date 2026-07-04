@@ -200,6 +200,11 @@ func setPrimary(s string) {
 }
 
 func sockPath() string {
+	// CLIPMGR_SOCK — отдельный сокет для дев-инстанса, чтобы не толкаться с
+	// установленным демоном (общий сокет — единственный конфликт single-instance).
+	if s := os.Getenv("CLIPMGR_SOCK"); s != "" {
+		return s
+	}
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		dir = "/tmp"

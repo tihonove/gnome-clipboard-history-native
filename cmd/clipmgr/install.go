@@ -20,9 +20,39 @@ import (
 const (
 	mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
 	customPrefix    = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
-	hotkeyBinding   = "<Super><Control>v"
-	hotkeyName      = "clipmgr"
 )
+
+// Боевые значения хоткея — по умолчанию. env-оверрайды поднимают ПАРАЛЛЕЛЬНЫЙ
+// дев-инстанс со своим слотом gsettings и своей клавишей, не трогая установленный:
+//   CLIPMGR_NAME   — имя слота/автозапуска (напр. clipmgr-dev),
+//   CLIPMGR_HOTKEY — клавиша (напр. <Super><Control>b),
+//   CLIPMGR_SOCK   — свой сокет (см. sockPath), прокидывается в команду хоткея.
+func hotkeyName() string {
+	if n := os.Getenv("CLIPMGR_NAME"); n != "" {
+		return n
+	}
+	return "clipmgr"
+}
+
+func hotkeyBinding() string {
+	if b := os.Getenv("CLIPMGR_HOTKEY"); b != "" {
+		return b
+	}
+	return "<Super><Control>v"
+}
+
+// isDevInstance — задан ли CLIPMGR_NAME (дев). У дева нет автозапуска: демона
+// запускаем вручную — вся разница именно в этом.
+func isDevInstance() bool { return hotkeyName() != "clipmgr" }
+
+// showCommand — команда gsettings-хоткея. Для дева прокидываем CLIPMGR_SOCK, чтобы
+// попап шёл на дев-сокет, а не на боевой.
+func showCommand(exe string) string {
+	if s := os.Getenv("CLIPMGR_SOCK"); s != "" {
+		return "env CLIPMGR_SOCK=" + s + " " + exe + " --show"
+	}
+	return exe + " --show"
+}
 
 // runInstall прописывает автозапуск и горячую клавишу на текущий путь бинарника
 // и запускает демона. Идемпотентно — можно запускать повторно.
@@ -38,7 +68,11 @@ func runInstall() {
 		fmt.Println("\nWayland: для вставки нужен доступ к /dev/uinput — настраиваю (один раз)…")
 		runSetupInput()
 	}
-	fmt.Println("Готово. clipmgr в автозапуске, Super+Ctrl+V настроен, демон запущен.")
+	if isDevInstance() {
+		fmt.Printf("Готово (dev %q). Хоткей %s настроен, демон запущен.\n", hotkeyName(), hotkeyBinding())
+	} else {
+		fmt.Printf("Готово. clipmgr в автозапуске, хоткей %s настроен, демон запущен.\n", hotkeyBinding())
+	}
 }
 
 func runUninstall() {
@@ -59,10 +93,14 @@ func runUninstall() {
 }
 
 func autostartPath() string {
-	return filepath.Join(xdgConfigHome(), "autostart", "clipmgr.desktop")
+	// имя файла — по CLIPMGR_NAME, чтобы дев-инстанс не затирал боевой автозапуск.
+	return filepath.Join(xdgConfigHome(), "autostart", hotkeyName()+".desktop")
 }
 
 func installAutostart(exe string) {
+	if isDevInstance() {
+		return // дев запускаем вручную — автозапуск не нужен
+	}
 	dir := filepath.Join(xdgConfigHome(), "autostart")
 	os.MkdirAll(dir, 0o755)
 	content := "[Desktop Entry]\n" +
@@ -80,29 +118,31 @@ func installAutostart(exe string) {
 }
 
 func installHotkey(exe string) {
-	cmd := exe + " --show"
+	cmd := showCommand(exe)
+	name := hotkeyName()
 	list := gsList()
-	for _, p := range list { // уже установлено? — перевесить binding на актуальный
-		if unquote(gsGet(customPath(p), "command")) == cmd {
-			gsSet(customPath(p), "binding", quote(hotkeyBinding))
-			fmt.Println("хоткей обновлён (Super+Ctrl+V):", p)
+	for _, p := range list { // наш слот (по имени) уже есть? — обновить команду/клавишу
+		if unquote(gsGet(customPath(p), "name")) == name {
+			gsSet(customPath(p), "command", quote(cmd))
+			gsSet(customPath(p), "binding", quote(hotkeyBinding()))
+			fmt.Printf("хоткей обновлён (%s → %s): %s\n", name, hotkeyBinding(), p)
 			return
 		}
 	}
 	slot := freeSlot(list)
 	list = append(list, slot)
 	gsSet(mediaKeysSchema, "custom-keybindings", formatList(list))
-	gsSet(customPath(slot), "name", quote(hotkeyName))
+	gsSet(customPath(slot), "name", quote(name))
 	gsSet(customPath(slot), "command", quote(cmd))
-	gsSet(customPath(slot), "binding", quote(hotkeyBinding))
-	fmt.Println("хоткей Super+Ctrl+V →", slot)
+	gsSet(customPath(slot), "binding", quote(hotkeyBinding()))
+	fmt.Printf("хоткей %s → %s: %s\n", hotkeyBinding(), name, slot)
 }
 
 func removeHotkey() {
 	list := gsList()
 	kept := make([]string, 0, len(list))
 	for _, p := range list {
-		if unquote(gsGet(customPath(p), "name")) == hotkeyName {
+		if unquote(gsGet(customPath(p), "name")) == hotkeyName() {
 			// сбросить ключи слота
 			for _, k := range []string{"name", "command", "binding"} {
 				exec.Command("gsettings", "reset", customPath(p), k).Run()
