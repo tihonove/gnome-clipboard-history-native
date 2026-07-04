@@ -24,7 +24,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"time"
 
@@ -39,16 +38,14 @@ const (
 	modulesLoadPath = "/etc/modules-load.d/clipmgr-uinput.conf"
 	// Пакет мог положить то же правило сюда — тогда настройка уже сделана.
 	pkgUdevRulePath = "/usr/lib/udev/rules.d/60-clipmgr-uinput.rules"
-	inputGroup      = "input"
 )
 
 // udevRuleContent — единый текст правила (тот же кладёт и .deb). uaccess даёт
-// мгновенный ACL активному пользователю (systemd, без релогина); GROUP=input —
-// запасной путь для logind, не выдающих ACL на не-seat узел (нужен повторный вход).
+// мгновенный ACL пользователю активной локальной сессии (systemd, без релогина и
+// без группы) — единственный механизм, никаких запасных путей.
 const udevRuleContent = `# clipmgr: доступ к /dev/uinput для синтетической вставки на Wayland (Shift+Insert).
-# uaccess — мгновенный ACL активному пользователю (systemd, без релогина);
-# GROUP=input — запасной путь (нужен повторный вход в сессию).
-KERNEL=="uinput", SUBSYSTEM=="misc", MODE="0660", GROUP="input", TAG+="uaccess", OPTIONS+="static_node=uinput"
+# uaccess — мгновенный ACL пользователю активной локальной сессии (systemd, без релогина).
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 `
 
 const modulesLoadContent = `# clipmgr: uinput нужен для вставки на Wayland
@@ -90,21 +87,15 @@ func runSetupInput() {
 		return
 	}
 	exe := resolveExe()
-	u, err := user.Current()
-	if err != nil {
-		log.Fatalf("не могу определить пользователя: %v", err)
-	}
 
 	if os.Geteuid() == 0 {
 		// Уже root (sudo clipmgr --setup-input или deb-postinst) — настраиваем напрямую.
-		// Проверить доступ реального пользователя отсюда нельзя (root всегда W_OK),
-		// поэтому только сообщаем про возможный релогин.
-		runSetupInputPrivileged(u.Username)
-		fmt.Println("Готово. Если вставка не заработает сразу — выйдите из сессии и войдите снова.")
+		runSetupInputPrivileged()
+		fmt.Println("Готово. Доступ к /dev/uinput настроен (uaccess).")
 		return
 	}
 
-	if err := elevateSelf(exe, "__setup-input-root", u.Username); err != nil {
+	if err := elevateSelf(exe, "__setup-input-root"); err != nil {
 		log.Fatalf("привилегированная настройка не удалась: %v", err)
 	}
 
@@ -113,13 +104,12 @@ func runSetupInput() {
 		fmt.Println("Готово. Доступ к /dev/uinput получен — вставка на Wayland заработает.")
 		restartDaemon(exe)
 	} else {
-		fmt.Println("udev-правило установлено, но доступ появится после выхода из сессии и " +
-			"повторного входа (членство в группе `input`).")
+		fmt.Println("udev-правило установлено, но ACL ещё не выдан — попробуйте выйти из сессии и войти снова.")
 	}
 }
 
 // runSetupInputPrivileged — скрытый __setup-input-root: собственно привилегированные шаги.
-func runSetupInputPrivileged(username string) {
+func runSetupInputPrivileged() {
 	if os.Geteuid() != 0 {
 		log.Fatal("__setup-input-root требует root")
 	}
@@ -131,8 +121,6 @@ func runSetupInputPrivileged(username string) {
 	if err := writeSystemFile(modulesLoadPath, modulesLoadContent); err != nil {
 		log.Fatalf("запись %s: %v", modulesLoadPath, err)
 	}
-	// Членство в группе input — запасной путь на случай, если uaccess не сработает.
-	addUserToInputGroup(username)
 	reloadUdev()
 }
 
@@ -186,22 +174,6 @@ func reloadUdev() {
 	}
 	if err := exec.Command("udevadm", "trigger", "--subsystem-match=misc", "--sysname-match=uinput").Run(); err != nil {
 		log.Printf("udevadm trigger: %v", err)
-	}
-}
-
-func addUserToInputGroup(username string) {
-	if username == "" || username == "root" {
-		return
-	}
-	if haveCmd("usermod") {
-		if err := exec.Command("usermod", "-aG", inputGroup, username).Run(); err == nil {
-			return
-		}
-	}
-	if haveCmd("gpasswd") {
-		if err := exec.Command("gpasswd", "-a", username, inputGroup).Run(); err != nil {
-			log.Printf("gpasswd -a %s %s: %v", username, inputGroup, err)
-		}
 	}
 }
 

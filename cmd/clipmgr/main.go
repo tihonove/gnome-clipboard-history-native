@@ -40,11 +40,7 @@ func main() {
 			runRemoveInput()
 			return
 		case "__setup-input-root": // скрытый: привилегированная часть (через pkexec/sudo)
-			if len(os.Args) < 3 {
-				runSetupInputPrivileged("")
-			} else {
-				runSetupInputPrivileged(os.Args[2])
-			}
+			runSetupInputPrivileged()
 			return
 		case "__remove-input-root": // скрытый: привилегированная часть
 			runRemoveInputPrivileged()

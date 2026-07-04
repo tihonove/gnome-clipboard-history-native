@@ -1,0 +1,7 @@
+Origin: clipmgr
+Label: clipmgr
+Codename: stable
+Architectures: amd64
+Components: main
+Description: clipmgr — clipboard history (Win+V) for GNOME
+SignWith: __FINGERPRINT__
