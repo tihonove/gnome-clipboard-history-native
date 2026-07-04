@@ -24,9 +24,10 @@ const (
 
 // Боевые значения хоткея — по умолчанию. env-оверрайды поднимают ПАРАЛЛЕЛЬНЫЙ
 // дев-инстанс со своим слотом gsettings и своей клавишей, не трогая установленный:
-//   CLIPMGR_NAME   — имя слота/автозапуска (напр. clipmgr-dev),
-//   CLIPMGR_HOTKEY — клавиша (напр. <Super><Control>b),
-//   CLIPMGR_SOCK   — свой сокет (см. sockPath), прокидывается в команду хоткея.
+//
+//	CLIPMGR_NAME   — имя слота/автозапуска (напр. clipmgr-dev),
+//	CLIPMGR_HOTKEY — клавиша (напр. <Super><Control>b),
+//	CLIPMGR_SOCK   — свой сокет (см. sockPath), прокидывается в команду хоткея.
 func hotkeyName() string {
 	if n := os.Getenv("CLIPMGR_NAME"); n != "" {
 		return n
