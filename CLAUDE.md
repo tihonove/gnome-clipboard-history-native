@@ -10,10 +10,11 @@
 показывает попап-список записей (тема Yaru), стрелки/PageUp/PageDown/Home/End
 двигают выбор, `Enter` вставляет выбранное в активное окно, `Escape` закрывает.
 
-Один бинарник, два бэкенда, выбор в рантайме (`isWayland()` в `wayland.go`):
-- **X11** (`main.go`) — полноценный: попап у курсора, xgb-граб, XTEST-вставка,
+Один бинарник (`cmd/clipmgr`), два бэкенда, выбор в рантайме (`isWayland()` в
+`cmd/clipmgr/wayland.go`):
+- **X11** (`x11.go`) — полноценный: попап у курсора, xgb-граб, XTEST-вставка,
   реальный захват истории.
-- **Wayland** (`wayland.go` + `uinput.go`) — попап по центру, штатные GTK-сигналы,
+- **Wayland** (`wayland.go` + `internal/uinput`) — попап по центру, штатные GTK-сигналы,
   вставка через `/dev/uinput` (`Shift+Insert`). История — через **XWayland-мост**:
   штатный wl-путь чужой буфер в фоне не видит (нет `data-control`), но mutter зеркалит
   буфер в X11 CLIPBOARD, и мы ловим XFIXES-уведомления по XWayland и читаем селекшн
@@ -35,7 +36,7 @@
 ## Сборка и dev-цикл
 
 ```sh
-go build -o clipmgr .
+go build -o clipmgr ./cmd/clipmgr
 
 # перезапустить демона после пересборки (типичный цикл разработки):
 pkill -x clipmgr; sleep 0.3; rm -f "$XDG_RUNTIME_DIR/clipmgr.sock"
@@ -63,12 +64,24 @@ xsel -ob        # проверить, что в буфер попал текст
 
 ## Структура
 
-- `main.go` — общий каркас + **X11-бэкенд**, разбит на секции: клиент, демон, попап,
-  позиционирование, вставка. Секции см. в комментариях-заголовках. Общий конструктор
-  содержимого попапа — `buildPopupBox()`.
-- `wayland.go` — **Wayland-бэкенд**: `isWayland()`, `showPopupWayland()`,
-  `finishWayland()`.
-- `uinput.go` — виртуальная клавиатура через `/dev/uinput` (вставка на Wayland).
+Стандартная Go-раскладка: бинарник в `cmd/`, приватные пакеты в `internal/`.
+Модуль — `github.com/tihonove/gnome-clipboard-history-native`.
+
+- `cmd/clipmgr/` — package main, разрезан по файлам:
+  - `main.go` — точка входа, диспатч флагов, `version`;
+  - `client.go` — «звонок» `--show` (его дёргает GNOME-хоткей);
+  - `install.go` — `--install`/`--uninstall`, gsettings-helpers;
+  - `daemon.go` — резидентная часть: сокет, инициализация бэкенда, слушалка
+    буфера, история, `setClipboard`;
+  - `popup.go` — общее для бэкендов: CSS, конструктор содержимого `buildPopupBox()`;
+  - `x11.go` — **X11-бэкенд**: попап у курсора, grab/poll, XTEST-вставка через
+    запасной keycode, позиционирование;
+  - `wayland.go` — **Wayland-бэкенд**: `isWayland()`, `showPopupWayland()`,
+    `finishWayland()`, XWayland-мост истории.
+- `internal/uinput/` — виртуальная клавиатура через `/dev/uinput` (вставка на
+  Wayland): `Init()`, `Close()`, `InjectPaste()`.
+- `.golangci.yml` — конфиг golangci-lint (гоняется в CI; намеренные
+  fire-and-forget вызовы исключены точечно — см. комментарии в конфиге).
 
 ## Инварианты и грабли (НЕ регрессировать)
 
@@ -78,7 +91,7 @@ xsel -ob        # проверить, что в буфер попал текст
   инициализация в `runDaemon` и диспатч `show`. X11-функции (grab/poll/XTEST/spare/
   positioning/isTerminal) на Wayland НЕ вызываются, и наоборот — не смешивать пути.
 
-### X11-бэкенд (`main.go`)
+### X11-бэкенд (`x11.go`)
 - **Ввод — через xgb, не GTK.** У всплывшего `GTK_WINDOW_POPUP` GNOME отбирает
   фокус (focus-stealing prevention), поэтому клавиатуру грабим через
   `xproto.GrabKeyboard` на root и читаем клавиши поллингом в `glib.TimeoutAdd`.
@@ -95,7 +108,7 @@ xsel -ob        # проверить, что в буфер попал текст
 - Все X-вызовы — из главного GTK-потока. Горутина сокета будит его только через
   `glib.IdleAdd`.
 
-### Wayland-бэкенд (`wayland.go` + `uinput.go`)
+### Wayland-бэкенд (`wayland.go` + `internal/uinput`)
 - **Попап — обычный `GTK_WINDOW_TOPLEVEL`.** Под Wayland он ПОЛУЧАЕТ фокус, поэтому
   клавиши читаем штатными GTK-сигналами (`key-press-event`); стрелки/PageUp/Home/End
   уходят в сфокусированный `ListBox` нативно — перехватываем только Enter/Escape.
@@ -107,7 +120,7 @@ xsel -ob        # проверить, что в буфер попал текст
   Wayland-окон не доходит). `Insert` — функциональная клавиша, раскладко-независима;
   `Shift+Insert` вставляет CLIPBOARD и в терминалах, и в GUI — поэтому детект окна НЕ
   нужен (он под Wayland и невозможен). Устройство создаём один раз при старте демона и
-  переиспользуем (см. комментарий в `uinput.go`). Env-override `CLIPMGR_PASTE=ctrlv`.
+  переиспользуем (см. комментарий в `internal/uinput`). Env-override `CLIPMGR_PASTE=ctrlv`.
 - **История — через XWayland-мост** (`startClipboardWatchWayland`). Фоновый wl-путь
   чужой буфер не видит (нет `data-control`), поэтому мониторим X11 CLIPBOARD, куда
   mutter зеркалит буфер: отдельное xgb-соединение к XWayland, XFIXES-уведомления о
@@ -168,4 +181,4 @@ changelog (его собирает git-cliff по `cliff.toml`).
 
 Требуется секрет репозитория **`REPOSITORY_PAT`** (PAT с `contents:write`) — иначе
 пуш тега из bump-version не запустит release (ограничение GITHUB_TOKEN).
-`ci.yml` гоняет сборку/`go vet` на push в main и PR.
+`ci.yml` гоняет сборку/`go vet`/golangci-lint на push в main и PR.
