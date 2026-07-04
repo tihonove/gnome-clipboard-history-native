@@ -117,16 +117,24 @@ func main() {
 		case "--uninstall":
 			runUninstall()
 			return
+		case "--install-system":
+			runInstallSystem()
+			return
+		case "--uninstall-system":
+			runUninstallSystem()
+			return
 		case "--version", "-v":
 			fmt.Println("clipmgr", version)
 			return
 		case "--help", "-h":
 			fmt.Println("clipmgr — история буфера (Super+Ctrl+V) для GNOME (X11 + базовый Wayland)\n" +
-				"  clipmgr             запустить демона\n" +
-				"  clipmgr --install   прописать автозапуск и хоткей Super+Ctrl+V, запустить демона\n" +
-				"  clipmgr --uninstall убрать автозапуск и хоткей\n" +
-				"  clipmgr --show      показать попап (вызывается хоткеем)\n" +
-				"  clipmgr --version   версия\n" +
+				"  clipmgr                    запустить демона\n" +
+				"  clipmgr --install          user: хоткей Super+Ctrl+V + автозапуск, запустить демона\n" +
+				"  clipmgr --uninstall        user: убрать хоткей/автозапуск, остановить демона\n" +
+				"  clipmgr --install-system   root: доступ к /dev/uinput (uaccess) + системный автозапуск\n" +
+				"  clipmgr --uninstall-system root: снять системную настройку\n" +
+				"  clipmgr --show             показать попап (вызывается хоткеем)\n" +
+				"  clipmgr --version          версия\n" +
 				"\n" +
 				"Wayland (GNOME): попап по центру, вставка через /dev/uinput (Shift+Insert),\n" +
 				"история — через XWayland-мост (mutter зеркалит буфер в X11 CLIPBOARD).\n" +
@@ -163,6 +171,15 @@ const (
 // runInstall прописывает автозапуск и горячую клавишу на текущий путь бинарника
 // и запускает демона. Идемпотентно — можно запускать повторно.
 func runInstall() {
+	exe := selfExe()
+	installAutostart(exe)
+	installHotkey(exe)
+	startDaemon(exe)
+	fmt.Println("Готово. clipmgr в автозапуске, Super+Ctrl+V настроен, демон запущен.")
+}
+
+// selfExe возвращает абсолютный путь текущего бинарника (с раскрытием симлинков).
+func selfExe() string {
 	exe, err := os.Executable()
 	if err != nil {
 		log.Fatalf("не могу определить путь бинарника: %v", err)
@@ -170,10 +187,7 @@ func runInstall() {
 	if resolved, e := filepath.EvalSymlinks(exe); e == nil {
 		exe = resolved
 	}
-	installAutostart(exe)
-	installHotkey(exe)
-	startDaemon(exe)
-	fmt.Println("Готово. clipmgr в автозапуске, Super+Ctrl+V настроен, демон запущен.")
+	return exe
 }
 
 func runUninstall() {
@@ -189,25 +203,103 @@ func runUninstall() {
 	fmt.Println("Готово. clipmgr убран из автозапуска и хоткеев.")
 }
 
+// ---------- системная установка (--install-system / --uninstall-system) ----------
+//
+// Root-часть: настраивает то, что per-user `--install` из сессии сделать не может,
+// а root-postinst — не должен трогать в чужой сессии. Вся логика тут (в бинарнике),
+// postinst/скрипты — тонкие обёртки, которые лишь зовут эти флаги.
+
+const (
+	udevRulePath     = "/etc/udev/rules.d/60-clipmgr-uinput.rules"
+	modulesLoadPath  = "/etc/modules-load.d/clipmgr-uinput.conf"
+	sysAutostartPath = "/etc/xdg/autostart/clipmgr.desktop"
+)
+
+// runInstallSystem выдаёт доступ к /dev/uinput и ставит системный автозапуск.
+// Идемпотентно — можно перезапускать, если что-то сломалось.
+func runInstallSystem() {
+	requireRoot("--install-system")
+
+	// 1. Модуль uinput: грузить при загрузке + прямо сейчас (без перезагрузки).
+	writeSysFile(modulesLoadPath, "uinput\n")
+	if err := exec.Command("modprobe", "uinput").Run(); err != nil {
+		log.Printf("modprobe uinput: %v (возможно, вкомпилирован в ядро — не критично)", err)
+	}
+
+	// 2. udev-правило: TAG uaccess → logind вешает ACL на устройство для юзера
+	//    АКТИВНОЙ локальной сессии (без группы input и без релогина). static_node
+	//    гарантирует узел с правами уже при загрузке модуля.
+	writeSysFile(udevRulePath,
+		"# clipmgr: доступ к /dev/uinput для активной локальной сессии (Wayland-вставка).\n"+
+			"KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"\n")
+	exec.Command("udevadm", "control", "--reload-rules").Run()
+	// применить правило к уже существующему узлу → ACL для текущей сессии сразу
+	exec.Command("udevadm", "trigger", "--subsystem-match=misc", "--sysname-match=uinput").Run()
+
+	// 3. Системный автозапуск: демон поднимется у каждого юзера при логине.
+	//    Exec — путь текущего бинарника (для deb это /usr/bin/clipmgr).
+	writeSysFile(sysAutostartPath, desktopEntry(selfExe()))
+
+	fmt.Println("Готово (system): доступ к /dev/uinput выдан, демон в автозапуске сессии.")
+}
+
+// runUninstallSystem снимает системную настройку (модуль оставляем загруженным).
+func runUninstallSystem() {
+	requireRoot("--uninstall-system")
+	for _, p := range []string{udevRulePath, modulesLoadPath, sysAutostartPath} {
+		if err := os.Remove(p); err == nil {
+			fmt.Println("удалено:", p)
+		}
+	}
+	exec.Command("udevadm", "control", "--reload-rules").Run()
+	fmt.Println("Готово (system): системная настройка снята.")
+}
+
+func requireRoot(cmd string) {
+	if os.Geteuid() != 0 {
+		log.Fatalf("%s требует root — запусти: sudo clipmgr %s", cmd, cmd)
+	}
+}
+
+// writeSysFile пишет системный конфиг (0644), создавая каталог при нужде.
+func writeSysFile(path, content string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		log.Fatalf("запись %s: %v", path, err)
+	}
+	fmt.Println("записано:", path)
+}
+
 func autostartPath() string {
 	return filepath.Join(xdgConfigHome(), "autostart", "clipmgr.desktop")
 }
 
 func installAutostart(exe string) {
+	// Если системный автозапуск уже стоит (из --install-system) — user-дубль не
+	// нужен: держим один источник, чтобы не плодить два запуска демона.
+	if _, err := os.Stat(sysAutostartPath); err == nil {
+		return
+	}
 	dir := filepath.Join(xdgConfigHome(), "autostart")
 	os.MkdirAll(dir, 0o755)
-	content := "[Desktop Entry]\n" +
+	if err := os.WriteFile(autostartPath(), []byte(desktopEntry(exe)), 0o644); err != nil {
+		log.Fatalf("автозапуск: %v", err)
+	}
+	fmt.Println("автозапуск:", autostartPath())
+}
+
+// desktopEntry — содержимое .desktop автозапуска демона (общее для user и system).
+func desktopEntry(exe string) string {
+	return "[Desktop Entry]\n" +
 		"Type=Application\n" +
 		"Name=clipmgr\n" +
-		"Comment=Clipboard history (Win+V) for GNOME/X11\n" +
+		"Comment=Clipboard history (Win+V) for GNOME\n" +
 		"Exec=" + exe + "\n" +
 		"X-GNOME-Autostart-enabled=true\n" +
 		"NoDisplay=true\n" +
 		"Terminal=false\n"
-	if err := os.WriteFile(autostartPath(), []byte(content), 0o644); err != nil {
-		log.Fatalf("автозапуск: %v", err)
-	}
-	fmt.Println("автозапуск:", autostartPath())
 }
 
 func installHotkey(exe string) {
@@ -342,6 +434,12 @@ func runDaemon() {
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	// Хоткей регистрируем при старте демона (идемпотентно). При установке из
+	// пакета per-user gsettings из root-postinst не поставить — демон делает это
+	// сам, в своей сессии, при первом запуске (в т.ч. поднятый /etc/xdg/autostart
+	// на логине). Общий путь с `--install` — код хоткея не дублируется.
+	installHotkey(selfExe())
 
 	if isWayland() {
 		// Wayland: xgb-грабы/XTEST не работают — вставка через собственное

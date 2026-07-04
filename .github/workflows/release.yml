@@ -126,8 +126,9 @@ jobs:
           mkdir -p pages/conf
           sed "s/__FINGERPRINT__/${FPR}/" packaging/apt/conf/distributions > pages/conf/distributions
 
-          # Статика: установщик, landing, публичный ключ (экспорт из secret).
-          cp packaging/apt/install.sh packaging/apt/index.html pages/
+          # Статика: установщики (apt + standalone), landing, публичный ключ.
+          cp packaging/apt/install.sh packaging/apt/install-standalone.sh \
+             packaging/apt/index.html pages/
           gpg --export "${FPR}" > pages/clipmgr-archive-keyring.gpg
 
           # Добавить пакет в компонент stable/main (подпись Release автоматом).
