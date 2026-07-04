@@ -94,6 +94,12 @@ var (
 
 	clipboard *gtk.Clipboard // CLIPBOARD: и слушаем, и владеем им при вставке
 	history   []string       // история буфера, свежие сверху (только в памяти)
+
+	// Когда мы сами кладём запись в буфер при вставке — не хотим двигать её наверх
+	// истории (выбранный элемент должен остаться на месте). Помечаем такой self-set,
+	// чтобы owner-change его пропустил.
+	selfSetText    string
+	selfSetPending bool
 )
 
 // version зашивается при релизной сборке через -ldflags "-X main.version=…".
@@ -115,12 +121,19 @@ func main() {
 			fmt.Println("clipmgr", version)
 			return
 		case "--help", "-h":
-			fmt.Println("clipmgr — история буфера (Win+V) для GNOME/X11\n" +
+			fmt.Println("clipmgr — история буфера (Super+Ctrl+V) для GNOME (X11 + базовый Wayland)\n" +
 				"  clipmgr             запустить демона\n" +
-				"  clipmgr --install   прописать автозапуск и хоткей Super+V, запустить демона\n" +
+				"  clipmgr --install   прописать автозапуск и хоткей Super+Ctrl+V, запустить демона\n" +
 				"  clipmgr --uninstall убрать автозапуск и хоткей\n" +
 				"  clipmgr --show      показать попап (вызывается хоткеем)\n" +
-				"  clipmgr --version   версия")
+				"  clipmgr --version   версия\n" +
+				"\n" +
+				"Wayland (GNOME): попап по центру, вставка через /dev/uinput (Shift+Insert),\n" +
+				"история — через XWayland-мост (mutter зеркалит буфер в X11 CLIPBOARD).\n" +
+				"  * нужен доступ на запись к /dev/uinput (иначе udev-правило);\n" +
+				"  * для истории нужен XWayland (обычно уже включён);\n" +
+				"  * переключение раскладки настроить через GNOME Tweaks (не Settings),\n" +
+				"    иначе модификаторы «съедаются» и хоткей/вставка ломаются на 2-й раскладке.")
 			return
 		}
 	}
@@ -143,7 +156,7 @@ func runClient() {
 const (
 	mediaKeysSchema = "org.gnome.settings-daemon.plugins.media-keys"
 	customPrefix    = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
-	hotkeyBinding   = "<Super>v"
+	hotkeyBinding   = "<Super><Control>v"
 	hotkeyName      = "clipmgr"
 )
 
@@ -160,7 +173,7 @@ func runInstall() {
 	installAutostart(exe)
 	installHotkey(exe)
 	startDaemon(exe)
-	fmt.Println("Готово. clipmgr в автозапуске, Super+V настроен, демон запущен.")
+	fmt.Println("Готово. clipmgr в автозапуске, Super+Ctrl+V настроен, демон запущен.")
 }
 
 func runUninstall() {
@@ -200,9 +213,10 @@ func installAutostart(exe string) {
 func installHotkey(exe string) {
 	cmd := exe + " --show"
 	list := gsList()
-	for _, p := range list { // уже установлено?
+	for _, p := range list { // уже установлено? — перевесить binding на актуальный
 		if unquote(gsGet(customPath(p), "command")) == cmd {
-			fmt.Println("хоткей уже настроен:", p)
+			gsSet(customPath(p), "binding", quote(hotkeyBinding))
+			fmt.Println("хоткей обновлён (Super+Ctrl+V):", p)
 			return
 		}
 	}
@@ -212,7 +226,7 @@ func installHotkey(exe string) {
 	gsSet(customPath(slot), "name", quote(hotkeyName))
 	gsSet(customPath(slot), "command", quote(cmd))
 	gsSet(customPath(slot), "binding", quote(hotkeyBinding))
-	fmt.Println("хоткей Super+V →", slot)
+	fmt.Println("хоткей Super+Ctrl+V →", slot)
 }
 
 func removeHotkey() {
@@ -329,33 +343,43 @@ func runDaemon() {
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	var err error
-	X, err = xgbutil.NewConn()
-	if err != nil {
-		log.Fatalf("нет соединения с X: %v", err)
+	if isWayland() {
+		// Wayland: xgb-грабы/XTEST не работают — вставка через собственное
+		// uinput-устройство (см. uinput.go). Захват истории под GNOME Wayland
+		// пока не решён (нет data-control) — см. TODO в wayland.go.
+		if err := initUinput(); err != nil {
+			log.Printf("uinput недоступен (%v). Проверь права на /dev/uinput. Вставка работать не будет.", err)
+		}
+	} else {
+		var err error
+		X, err = xgbutil.NewConn()
+		if err != nil {
+			log.Fatalf("нет соединения с X: %v", err)
+		}
+		keybind.Initialize(X)
+		if err := xtest.Init(X.Conn()); err != nil {
+			log.Fatalf("XTEST init: %v", err)
+		}
+		if cs := keybind.StrToKeycodes(X, "Control_L"); len(cs) > 0 {
+			ctrlKey = cs[0]
+		}
+		if vs := keybind.StrToKeycodes(X, "v"); len(vs) > 0 {
+			vKey = vs[0]
+		}
+		if ss := keybind.StrToKeycodes(X, "Shift_L"); len(ss) > 0 {
+			shiftKey = ss[0]
+		}
+		spareKey = findSpareKeycode()
 	}
-	keybind.Initialize(X)
-	if err := xtest.Init(X.Conn()); err != nil {
-		log.Fatalf("XTEST init: %v", err)
-	}
-	if cs := keybind.StrToKeycodes(X, "Control_L"); len(cs) > 0 {
-		ctrlKey = cs[0]
-	}
-	if vs := keybind.StrToKeycodes(X, "v"); len(vs) > 0 {
-		vKey = vs[0]
-	}
-	if ss := keybind.StrToKeycodes(X, "Shift_L"); len(ss) > 0 {
-		shiftKey = ss[0]
-	}
-	spareKey = findSpareKeycode()
 
 	gtk.Init(nil)
 	applyCSS()
 	startClipboardWatch()
 	startSocketListener()
 
-	log.Println("daemon (GTK): слушаю сокет", sockPath(), "— жду --show")
+	log.Printf("daemon (GTK, %s): слушаю сокет %s — жду --show", sessionKind(), sockPath())
 	gtk.Main()
+	closeUinput() // no-op на X11
 }
 
 func applyCSS() {
@@ -390,7 +414,14 @@ func startSocketListener() {
 			c.Close()
 			switch {
 			case strings.HasPrefix(string(buf[:n]), "show"):
-				glib.IdleAdd(func() bool { showPopup(); return false })
+				glib.IdleAdd(func() bool {
+					if isWayland() {
+						showPopupWayland()
+					} else {
+						showPopup()
+					}
+					return false
+				})
 			case strings.HasPrefix(string(buf[:n]), "quit"):
 				glib.IdleAdd(func() bool { gtk.MainQuit(); return false })
 			}
@@ -406,16 +437,34 @@ func startClipboardWatch() {
 	if err != nil {
 		log.Fatalf("clipboard: %v", err)
 	}
+	if isWayland() {
+		// Под GNOME Wayland фоновый GTK owner-change чужие копирования не видит
+		// (нет data-control). Историю снимаем через XWayland: mutter зеркалит буфер
+		// в X11 CLIPBOARD, и X-клиент получает XFIXES-уведомления — см. wayland.go.
+		startClipboardWatchWayland()
+		return
+	}
 	clipboard.Connect("owner-change", func() {
 		// WaitForText прямо в обработчике сигнала небезопасен (реентранси) —
 		// откладываем на следующий idle в том же GTK-потоке.
 		glib.IdleAdd(func() bool {
 			if txt, e := clipboard.WaitForText(); e == nil {
-				addToHistory(txt)
+				ingestClipboard(txt)
 			}
 			return false
 		})
 	})
+}
+
+// ingestClipboard кладёт новое содержимое буфера в историю, пропуская наши
+// собственные вставки (self-set) — чтобы выбранная запись не прыгала наверх.
+// Вызывать только из главного GTK-потока.
+func ingestClipboard(txt string) {
+	if selfSetPending && txt == selfSetText {
+		selfSetPending = false // это наша же вставка — порядок не трогаем
+		return
+	}
+	addToHistory(txt)
 }
 
 // addToHistory кладёт запись наверх истории (дедуп, лимит). Только текст, в памяти.
@@ -461,44 +510,7 @@ func showPopup() {
 		}
 	}
 
-	outer, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
-	addClass(outer, "clip-frame")
-
-	header, _ := gtk.LabelNew("Clipboard")
-	header.SetXAlign(0)
-	addClass(header, "clip-header")
-	outer.PackStart(header, false, false, 0)
-
-	if len(history) == 0 {
-		ph, _ := gtk.LabelNew("Clipboard is empty.\nCopy something to see it here.")
-		ph.SetJustify(gtk.JUSTIFY_CENTER)
-		ph.SetHAlign(gtk.ALIGN_CENTER)
-		ph.SetVAlign(gtk.ALIGN_CENTER)
-		ph.SetSizeRequest(listW, 285) // та же высота, что и у списка
-		addClass(ph, "clip-empty")
-		outer.PackStart(ph, true, true, 0)
-	} else {
-		listBox, _ = gtk.ListBoxNew()
-		listBox.SetSelectionMode(gtk.SELECTION_BROWSE)
-		for _, it := range history {
-			lbl, _ := gtk.LabelNew(displayText(it))
-			lbl.SetXAlign(0)
-			lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
-			lbl.SetVAlign(gtk.ALIGN_FILL)
-			lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
-			lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
-			lbl.SetMaxWidthChars(42)
-			listBox.Add(lbl)
-		}
-
-		scrolled, _ = gtk.ScrolledWindowNew(nil, nil)
-		scrolled.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
-		scrolled.SetSizeRequest(listW, 285) // видимая часть — ~3.5 записи
-		scrolled.Add(listBox)
-		outer.PackStart(scrolled, true, true, 0)
-	}
-
-	w.Add(outer)
+	w.Add(buildPopupBox())
 
 	x, y := popupXY()
 	w.Move(x, y)
@@ -518,6 +530,50 @@ func showPopup() {
 		}
 		return false
 	})
+}
+
+// buildPopupBox собирает содержимое попапа (заголовок + список записей или
+// плейсхолдер пустоты) и выставляет глобалы listBox/scrolled. Общий для обоих
+// бэкендов — X11 (showPopup) и Wayland (showPopupWayland).
+func buildPopupBox() *gtk.Box {
+	outer, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
+	addClass(outer, "clip-frame")
+
+	header, _ := gtk.LabelNew("Clipboard")
+	header.SetXAlign(0)
+	addClass(header, "clip-header")
+	outer.PackStart(header, false, false, 0)
+
+	if len(history) == 0 {
+		ph, _ := gtk.LabelNew("Clipboard is empty.\nCopy something to see it here.")
+		ph.SetJustify(gtk.JUSTIFY_CENTER)
+		ph.SetHAlign(gtk.ALIGN_CENTER)
+		ph.SetVAlign(gtk.ALIGN_CENTER)
+		ph.SetSizeRequest(listW, 285) // та же высота, что и у списка
+		addClass(ph, "clip-empty")
+		outer.PackStart(ph, true, true, 0)
+		return outer
+	}
+
+	listBox, _ = gtk.ListBoxNew()
+	listBox.SetSelectionMode(gtk.SELECTION_BROWSE)
+	for _, it := range history {
+		lbl, _ := gtk.LabelNew(displayText(it))
+		lbl.SetXAlign(0)
+		lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
+		lbl.SetVAlign(gtk.ALIGN_FILL)
+		lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
+		lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
+		lbl.SetMaxWidthChars(42)
+		listBox.Add(lbl)
+	}
+
+	scrolled, _ = gtk.ScrolledWindowNew(nil, nil)
+	scrolled.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
+	scrolled.SetSizeRequest(listW, 285) // видимая часть — ~3.5 записи
+	scrolled.Add(listBox)
+	outer.PackStart(scrolled, true, true, 0)
+	return outer
 }
 
 func addClass(w interface {
@@ -707,8 +763,12 @@ func isTermClass(s string) bool {
 
 // setClipboard делает демона владельцем CLIPBOARD с текстом s. Пока демон жив, он
 // сам обслуживает запросы вставки — поэтому внешний xsel/xclip не нужен.
+// Вызывается только при вставке выбранной записи, поэтому помечаем self-set: пришедший
+// следом owner-change с этим текстом не должен двигать запись наверх истории.
 func setClipboard(s string) {
 	if clipboard != nil {
+		selfSetText = s
+		selfSetPending = true
 		clipboard.SetText(s)
 	}
 }
