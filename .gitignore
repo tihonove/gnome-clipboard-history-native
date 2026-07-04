@@ -1,2 +1,4 @@
 # собранный бинарник (пересобирается через `go build`)
 /clipmgr
+/clipmgr-linux-x64
+*.deb
