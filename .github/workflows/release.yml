@@ -87,6 +87,9 @@ jobs:
   apt-repo:
     needs: package
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # git push в ветку gh-pages
+      pages: write # ретриггер сборки Pages (POST /pages/builds), см. шаг verify
     steps:
       - uses: actions/checkout@v4 # main: шаблоны из packaging/apt
 
@@ -143,3 +146,43 @@ jobs:
               commit -m "apt: publish ${GITHUB_REF_NAME}"
           git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" \
               HEAD:gh-pages
+
+      # Публикацию из ветки в live-сайт делает отдельный GitHub-воркфлоу
+      # «pages build and deployment» — он иногда флачит транзиентно
+      # (`Deployment failed, try again later`) без авто-ретрая, и apt тихо
+      # застревает на старой версии. Здесь ждём, пока сайт реально начнёт отдавать
+      # свежую версию, и до 5 раз передёргиваем сборку Pages (POST /pages/builds).
+      # Если и после этого не опубликовалось — валим ЭТУ джобу, чтобы флак был виден.
+      - name: Verify Pages published (retry deploy on flake)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null || true)"
+          BASE="${BASE%/}"
+          if [ -z "$BASE" ]; then
+            echo "::warning::не удалось получить html_url Pages из API — строю URL по owner/repo"
+            BASE="https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}"
+          fi
+          URL="$BASE/dists/stable/main/binary-amd64/Packages"
+          echo "Жду, пока $URL начнёт отдавать Version: $VERSION"
+
+          published() {
+            # ?cb= — обход кэша Fastly, чтобы не поймать старую версию из CDN
+            curl -fsSL "$URL?cb=${RANDOM}${1}" 2>/dev/null | grep -qx "Version: $VERSION"
+          }
+
+          for attempt in 1 2 3 4 5; do
+            for w in $(seq 1 9); do
+              if published "$attempt-$w"; then
+                echo "✓ Pages отдаёт $VERSION (попытка $attempt)"
+                exit 0
+              fi
+              sleep 10
+            done
+            echo "::warning::Pages ещё не отдаёт $VERSION — триггерю пересборку ($attempt/5)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" >/dev/null 2>&1 || true
+          done
+
+          echo "::error::Pages не опубликовал $VERSION после 5 ретраев — проверь вручную." >&2
+          exit 1
