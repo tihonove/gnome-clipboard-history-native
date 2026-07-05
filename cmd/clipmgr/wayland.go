@@ -9,7 +9,16 @@
 //   - Навигация по списку — нативная: стрелки/PageUp/Home/End уходят в сфокусированный
 //     ListBox, перехватываем только Enter/Escape.
 //   - Скрытие при потере фокуса — focus-out-event (клика-мимо через pointer-grab нет).
-//   - Позиция — по центру: задать окну координаты (у курсора) Wayland не даёт.
+//   - Позиция — по центру: под-курсорное/в-активном-окне позиционирование (как на X11,
+//     см. popupXY в x11.go) на нативном Wayland-toplevel НЕВОЗМОЖНО — тот же класс
+//     ограничения, что data-control и XTEST ниже. Причины: (1) mutter игнорирует
+//     gtk_window_move — координаты toplevel задаёт компоситор, не клиент; (2) курсор не
+//     достать надёжно (QueryPointer по XWayland свеж лишь над XWayland-окном, а
+//     _NET_ACTIVE_WINDOW для нативных wl-окон = None). Единственный позиционируемый
+//     попап — override-redirect через XWayland (GDK_BACKEND=x11), но XGrabKeyboard на
+//     root под mutter вернёт Success и не отдаст клавиш (фокус уходит wl-окну) — ровно
+//     причина, по которой этот бэкенд на нативном toplevel. Лучшее достижимое —
+//     центр на мониторе, который выберет mutter (обычно активный/подкурсорный).
 //   - Вставка — uinput Shift+Insert (см. internal/uinput): раскладко-независимо и
 //     универсально для терминалов и GUI, поэтому детект окна/терминала не нужен
 //     (он под Wayland и невозможен).
@@ -156,7 +165,10 @@ func showPopupWayland() {
 	w.SetSkipTaskbarHint(true)
 	w.SetSkipPagerHint(true)
 	w.SetResizable(false)
-	w.SetPosition(gtk.WIN_POS_CENTER_ALWAYS) // позицию у курсора Wayland задать не даёт
+	// Центр монитора. Под-курсорную позицию Wayland задать не даёт (mutter игнорирует
+	// move; курсор/активное окно не достать) — подробности в шапке файла. Монитор
+	// выбирает mutter (обычно активный/подкурсорный); клиент на это не влияет.
+	w.SetPosition(gtk.WIN_POS_CENTER_ALWAYS)
 	w.SetTypeHint(gdk.WINDOW_TYPE_HINT_DIALOG)
 	if screen, err := gdk.ScreenGetDefault(); err == nil && screen.IsComposited() {
 		if vis, err := screen.GetRGBAVisual(); err == nil && vis != nil {

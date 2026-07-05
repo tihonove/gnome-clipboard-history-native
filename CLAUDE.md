@@ -122,8 +122,15 @@ xsel -ob        # проверить, что в буфер попал текст
   уходят в сфокусированный `ListBox` нативно — перехватываем только Enter/Escape.
   Никакого xgb-грабa. Не превращать обратно в override-redirect — фокуса не будет.
 - **Скрытие — по `focus-out-event`** (клика-мимо через pointer-grab на Wayland нет).
-- **Позиция — по центру** (`WIN_POS_CENTER_ALWAYS`). Задать окну координаты у курсора
-  Wayland не даёт — не пытаться.
+- **Позиция — по центру** (`WIN_POS_CENTER_ALWAYS`). Под-курсорное / в-активном-окне
+  позиционирование (как X11 `popupXY`) на нативном toplevel НЕВОЗМОЖНО: mutter
+  игнорирует `gtk_window_move`, а курсор не достать надёжно (`QueryPointer` по XWayland
+  свеж лишь над XWayland-окном; `_NET_ACTIVE_WINDOW` для нативных wl-окон = `None`).
+  Единственный позиционируемый попап — override-redirect через XWayland
+  (`GDK_BACKEND=x11`), но `XGrabKeyboard` на root под mutter вернёт `Success` и клавиш
+  не отдаст (фокус уходит wl-окну) — потому бэкенд и на нативном toplevel. Лучшее
+  достижимое — центр на мониторе, который выберет mutter (обычно активный). Не пытаться
+  ставить у курсора — тот же класс ограничения, что `data-control`/XTEST.
 - **Вставка — `Shift+Insert` через `/dev/uinput`** (не XTEST — он до нативных
   Wayland-окон не доходит). `Insert` — функциональная клавиша, раскладко-независима.
   ВАЖНО: `Shift+Insert` в GUI-полях берёт CLIPBOARD, а в VTE-терминалах — PRIMARY,
