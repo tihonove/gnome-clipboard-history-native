@@ -18,7 +18,7 @@ jobs:
       version: ${{ github.ref_name }} # vX.Y.Z; build.yml срежет ведущую v
 
   # Собрать .deb из готового бинарника (nfpm). Пакет кладёт бинарник + статическое
-  # udev-правило (uaccess); установку в сессии делает `clipmgr --install`.
+  # udev-правило (uaccess); установку в сессии делает `gnome-clipboard-history-native --install`.
   package:
     needs: build
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
       - name: Download binary
         uses: actions/download-artifact@v4
         with:
-          name: clipmgr-linux-x64 # → ./clipmgr-linux-x64 (nfpm.yaml ждёт его тут)
+          name: gnome-clipboard-history-native-linux-x64 # → ./gnome-clipboard-history-native-linux-x64 (nfpm.yaml ждёт его тут)
 
       - uses: actions/setup-go@v5
         with:
@@ -43,11 +43,11 @@ jobs:
           "$(go env GOPATH)/bin/nfpm" pkg \
             --config packaging/nfpm.yaml \
             --packager deb \
-            --target "clipmgr_${VERSION}_amd64.deb"
+            --target "gnome-clipboard-history-native_${VERSION}_amd64.deb"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: clipmgr-deb
+          name: gnome-clipboard-history-native-deb
           path: "*.deb"
           if-no-files-found: error
 
@@ -78,7 +78,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: clipmgr ${{ github.ref_name }}
+          name: gnome-clipboard-history-native ${{ github.ref_name }}
           body: ${{ steps.cliff.outputs.content }}
           files: artifacts/*
 
@@ -96,7 +96,7 @@ jobs:
       - name: Download .deb
         uses: actions/download-artifact@v4
         with:
-          name: clipmgr-deb
+          name: gnome-clipboard-history-native-deb
           path: debs
 
       - name: Install reprepro
@@ -131,7 +131,7 @@ jobs:
 
           # Статика: установщики (apt + standalone) + публичный ключ.
           cp packaging/apt/install.sh packaging/apt/install-standalone.sh pages/
-          gpg --export "${FPR}" > pages/clipmgr-archive-keyring.gpg
+          gpg --export "${FPR}" > pages/gnome-clipboard-history-native-archive-keyring.gpg
 
           # Добавить пакет в компонент stable/main (подпись Release автоматом).
           reprepro -b pages includedeb stable debs/*.deb

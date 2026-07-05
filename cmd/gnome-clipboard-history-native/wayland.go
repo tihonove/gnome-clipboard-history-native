@@ -90,7 +90,7 @@ func startClipboardWatchWayland() {
 
 	a := selectionAtoms{
 		clip:    internAtom(c, "CLIPBOARD"),
-		prop:    internAtom(c, "CLIPMGR_SEL"), // куда владелец кладёт конвертированное значение
+		prop:    internAtom(c, "GCHN_SEL"), // куда владелец кладёт конвертированное значение
 		targets: internAtom(c, "TARGETS"),
 		utf8:    internAtom(c, "UTF8_STRING"),
 		png:     internAtom(c, "image/png"),

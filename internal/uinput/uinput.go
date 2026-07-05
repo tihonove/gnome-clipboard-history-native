@@ -49,7 +49,7 @@ var uinputFile *os.File
 
 // HasAccess сообщает, есть ли право записи в /dev/uinput (узел существует и W_OK).
 // false также если модуль uinput не загружен (узла нет) — это тоже трактуем как
-// «нужна настройка» (см. clipmgr --setup-input).
+// «нужна настройка» (см. gnome-clipboard-history-native --setup-input).
 func HasAccess() bool { return unix.Access(DevPath, unix.W_OK) == nil }
 
 // uinputUserDev — struct uinput_user_dev из linux/uinput.h (legacy-путь создания).
@@ -78,7 +78,7 @@ func Init() error {
 	}
 	for _, k := range []int{
 		keyLeftShift, keyInsert, // Shift+Insert — основной способ
-		keyLeftCtrl, keyV, // Ctrl+V — fallback (CLIPMGR_PASTE=ctrlv)
+		keyLeftCtrl, keyV, // Ctrl+V — fallback (GCHN_PASTE=ctrlv)
 	} {
 		if err := unix.IoctlSetInt(fd, uiSetKeybit, k); err != nil {
 			f.Close()
@@ -87,7 +87,7 @@ func Init() error {
 	}
 
 	var dev uinputUserDev
-	copy(dev.Name[:], "clipmgr-virtual-kbd")
+	copy(dev.Name[:], "gchn-virtual-kbd")
 	dev.ID.Bustype = 0x03 // BUS_USB
 	dev.ID.Vendor = 0x1234
 	dev.ID.Product = 0x5678
@@ -161,9 +161,9 @@ func injectCtrlV()       { combo(keyLeftCtrl, keyV) }
 // раскладко-независимо и работает и в терминалах, и в GUI. ВАЖНО: GUI-поля по нему
 // берут CLIPBOARD, а VTE-терминалы — PRIMARY, поэтому вызывающая сторона
 // (finishWayland) кладёт выбранную запись в ОБА селекшна. Скрытый env-override
-// CLIPMGR_PASTE=ctrlv — на случай приложения, не понимающего Shift+Insert.
+// GCHN_PASTE=ctrlv — на случай приложения, не понимающего Shift+Insert.
 func InjectPaste() {
-	if os.Getenv("CLIPMGR_PASTE") == "ctrlv" {
+	if os.Getenv("GCHN_PASTE") == "ctrlv" {
 		injectCtrlV()
 		return
 	}

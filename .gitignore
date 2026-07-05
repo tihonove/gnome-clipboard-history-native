@@ -1,5 +1,5 @@
 # собранные бинарники (пересобираются через `go build`)
-/clipmgr
-/clipmgr-linux-x64
+/gnome-clipboard-history-native
+/gnome-clipboard-history-native-linux-x64
 *.deb
-/clipmgr-dev
+/gnome-clipboard-history-native-dev

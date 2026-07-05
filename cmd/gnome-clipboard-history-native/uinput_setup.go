@@ -11,7 +11,7 @@
 // Правило — системный артефакт (ставится root'ом раз на машину). Два канала доставки:
 //   - .deb/.rpm: пакет статически кладёт то же правило в /usr/lib/udev/rules.d —
 //     тогда доступ есть сразу после установки, код ниже не задействуется;
-//   - голый бинарник: clipmgr сам эскалируется (pkexec/sudo) и пишет правило в /etc.
+//   - голый бинарник: gnome-clipboard-history-native сам эскалируется (pkexec/sudo) и пишет правило в /etc.
 //
 // Привилегированную запись делает НАШ ЖЕ бинарник со скрытым сабкомандом
 // __setup-input-root — так все операции остаются на Go (os.WriteFile), без хрупких
@@ -34,21 +34,21 @@ import (
 
 const (
 	// Когда правило пишем сами — кладём в /etc (перекрывает дистрибутивные правила).
-	udevRulePath    = "/etc/udev/rules.d/60-clipmgr-uinput.rules"
-	modulesLoadPath = "/etc/modules-load.d/clipmgr-uinput.conf"
+	udevRulePath    = "/etc/udev/rules.d/60-gnome-clipboard-history-native-uinput.rules"
+	modulesLoadPath = "/etc/modules-load.d/gnome-clipboard-history-native-uinput.conf"
 	// Пакет мог положить то же правило сюда — тогда настройка уже сделана.
-	pkgUdevRulePath = "/usr/lib/udev/rules.d/60-clipmgr-uinput.rules"
+	pkgUdevRulePath = "/usr/lib/udev/rules.d/60-gnome-clipboard-history-native-uinput.rules"
 )
 
 // udevRuleContent — единый текст правила (тот же кладёт и .deb). uaccess даёт
 // мгновенный ACL пользователю активной локальной сессии (systemd, без релогина и
 // без группы) — единственный механизм, никаких запасных путей.
-const udevRuleContent = `# clipmgr: доступ к /dev/uinput для синтетической вставки на Wayland (Shift+Insert).
+const udevRuleContent = `# gnome-clipboard-history-native: доступ к /dev/uinput для синтетической вставки на Wayland (Shift+Insert).
 # uaccess — мгновенный ACL пользователю активной локальной сессии (systemd, без релогина).
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 `
 
-const modulesLoadContent = `# clipmgr: uinput нужен для вставки на Wayland
+const modulesLoadContent = `# gnome-clipboard-history-native: uinput нужен для вставки на Wayland
 uinput
 `
 
@@ -89,7 +89,7 @@ func runSetupInput() {
 	exe := resolveExe()
 
 	if os.Geteuid() == 0 {
-		// Уже root (sudo clipmgr --setup-input или deb-postinst) — настраиваем напрямую.
+		// Уже root (sudo gnome-clipboard-history-native --setup-input или deb-postinst) — настраиваем напрямую.
 		runSetupInputPrivileged()
 		fmt.Println("Готово. Доступ к /dev/uinput настроен (uaccess).")
 		return

@@ -50,7 +50,7 @@ func runDaemon() {
 		// (startClipboardWatchWayland в wayland.go).
 		if err := uinput.Init(); err != nil {
 			log.Printf("uinput недоступен (%v). Вставка на Wayland отключена — "+
-				"выполните один раз: clipmgr --setup-input", err)
+				"выполните один раз: gnome-clipboard-history-native --setup-input", err)
 		}
 	} else {
 		var err error
@@ -199,14 +199,14 @@ func setPrimary(s string) {
 }
 
 func sockPath() string {
-	// CLIPMGR_SOCK — отдельный сокет для дев-инстанса, чтобы не толкаться с
+	// GCHN_SOCK — отдельный сокет для дев-инстанса, чтобы не толкаться с
 	// установленным демоном (общий сокет — единственный конфликт single-instance).
-	if s := os.Getenv("CLIPMGR_SOCK"); s != "" {
+	if s := os.Getenv("GCHN_SOCK"); s != "" {
 		return s
 	}
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		dir = "/tmp"
 	}
-	return filepath.Join(dir, "clipmgr.sock")
+	return filepath.Join(dir, "gnome-clipboard-history-native.sock")
 }

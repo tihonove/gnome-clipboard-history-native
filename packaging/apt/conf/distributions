@@ -1,7 +1,7 @@
-Origin: clipmgr
-Label: clipmgr
+Origin: gnome-clipboard-history-native
+Label: gnome-clipboard-history-native
 Codename: stable
 Architectures: amd64
 Components: main
-Description: clipmgr — clipboard history (Win+V) for GNOME
+Description: gnome-clipboard-history-native — clipboard history (Super+Ctrl+V) for GNOME
 SignWith: __FINGERPRINT__

@@ -25,32 +25,32 @@ const (
 // Боевые значения хоткея — по умолчанию. env-оверрайды поднимают ПАРАЛЛЕЛЬНЫЙ
 // дев-инстанс со своим слотом gsettings и своей клавишей, не трогая установленный:
 //
-//	CLIPMGR_NAME   — имя слота/автозапуска (напр. clipmgr-dev),
-//	CLIPMGR_HOTKEY — клавиша (напр. <Super><Control>b),
-//	CLIPMGR_SOCK   — свой сокет (см. sockPath), прокидывается в команду хоткея.
+//	GCHN_NAME   — имя слота/автозапуска (напр. gnome-clipboard-history-native-dev),
+//	GCHN_HOTKEY — клавиша (напр. <Super><Control>b),
+//	GCHN_SOCK   — свой сокет (см. sockPath), прокидывается в команду хоткея.
 func hotkeyName() string {
-	if n := os.Getenv("CLIPMGR_NAME"); n != "" {
+	if n := os.Getenv("GCHN_NAME"); n != "" {
 		return n
 	}
-	return "clipmgr"
+	return "gnome-clipboard-history-native"
 }
 
 func hotkeyBinding() string {
-	if b := os.Getenv("CLIPMGR_HOTKEY"); b != "" {
+	if b := os.Getenv("GCHN_HOTKEY"); b != "" {
 		return b
 	}
 	return "<Super><Control>v"
 }
 
-// isDevInstance — задан ли CLIPMGR_NAME (дев). У дева нет автозапуска: демона
+// isDevInstance — задан ли GCHN_NAME (дев). У дева нет автозапуска: демона
 // запускаем вручную — вся разница именно в этом.
-func isDevInstance() bool { return hotkeyName() != "clipmgr" }
+func isDevInstance() bool { return hotkeyName() != "gnome-clipboard-history-native" }
 
-// showCommand — команда gsettings-хоткея. Для дева прокидываем CLIPMGR_SOCK, чтобы
+// showCommand — команда gsettings-хоткея. Для дева прокидываем GCHN_SOCK, чтобы
 // попап шёл на дев-сокет, а не на боевой.
 func showCommand(exe string) string {
-	if s := os.Getenv("CLIPMGR_SOCK"); s != "" {
-		return "env CLIPMGR_SOCK=" + s + " " + exe + " --show"
+	if s := os.Getenv("GCHN_SOCK"); s != "" {
+		return "env GCHN_SOCK=" + s + " " + exe + " --show"
 	}
 	return exe + " --show"
 }
@@ -72,7 +72,7 @@ func runInstall() {
 	if isDevInstance() {
 		fmt.Printf("Готово (dev %q). Хоткей %s настроен, демон запущен.\n", hotkeyName(), hotkeyBinding())
 	} else {
-		fmt.Printf("Готово. clipmgr в автозапуске, хоткей %s настроен, демон запущен.\n", hotkeyBinding())
+		fmt.Printf("Готово. gnome-clipboard-history-native в автозапуске, хоткей %s настроен, демон запущен.\n", hotkeyBinding())
 	}
 }
 
@@ -88,13 +88,13 @@ func runUninstall() {
 	}
 	if ruleInstalled() {
 		fmt.Println("udev-правило /dev/uinput оставлено (могло понадобиться другим). " +
-			"Чтобы убрать: clipmgr --remove-input")
+			"Чтобы убрать: gnome-clipboard-history-native --remove-input")
 	}
-	fmt.Println("Готово. clipmgr убран из автозапуска и хоткеев.")
+	fmt.Println("Готово. gnome-clipboard-history-native убран из автозапуска и хоткеев.")
 }
 
 func autostartPath() string {
-	// имя файла — по CLIPMGR_NAME, чтобы дев-инстанс не затирал боевой автозапуск.
+	// имя файла — по GCHN_NAME, чтобы дев-инстанс не затирал боевой автозапуск.
 	return filepath.Join(xdgConfigHome(), "autostart", hotkeyName()+".desktop")
 }
 
@@ -106,8 +106,8 @@ func installAutostart(exe string) {
 	os.MkdirAll(dir, 0o755)
 	content := "[Desktop Entry]\n" +
 		"Type=Application\n" +
-		"Name=clipmgr\n" +
-		"Comment=Clipboard history (Win+V) for GNOME/X11\n" +
+		"Name=gnome-clipboard-history-native\n" +
+		"Comment=Clipboard history (Super+Ctrl+V) for GNOME on X11 & Wayland\n" +
 		"Exec=" + exe + "\n" +
 		"X-GNOME-Autostart-enabled=true\n" +
 		"NoDisplay=true\n" +

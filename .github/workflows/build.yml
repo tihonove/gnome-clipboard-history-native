@@ -44,10 +44,10 @@ jobs:
         run: |
           go build -trimpath \
             -ldflags "-s -w -X main.version=${{ steps.ver.outputs.version }}" \
-            -o clipmgr-linux-x64 ./cmd/clipmgr
+            -o gnome-clipboard-history-native-linux-x64 ./cmd/gnome-clipboard-history-native
 
       - uses: actions/upload-artifact@v4
         with:
-          name: clipmgr-linux-x64
-          path: clipmgr-linux-x64
+          name: gnome-clipboard-history-native-linux-x64
+          path: gnome-clipboard-history-native-linux-x64
           if-no-files-found: error

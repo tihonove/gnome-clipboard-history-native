@@ -1,10 +1,10 @@
-# nfpm — сборка .deb из готового бинарника clipmgr-linux-x64.
-# Установку в сессии делает сам бинарник (`clipmgr --install`: автозапуск, хоткей,
-# демон). Пакет лишь раскладывает бинарник и СТАТИЧЕСКИ кладёт udev-правило
-# (uaccess) — тогда `--install` видит, что доступ к /dev/uinput уже настроен, и не
-# дёргает sudo. Версия берётся из env VERSION (в CI — тег без ведущей v).
+# nfpm — сборка .deb из готового бинарника gnome-clipboard-history-native-linux-x64.
+# Установку в сессии делает сам бинарник (`gnome-clipboard-history-native --install`:
+# автозапуск, хоткей, демон). Пакет лишь раскладывает бинарник и СТАТИЧЕСКИ кладёт
+# udev-правило (uaccess) — тогда `--install` видит, что доступ к /dev/uinput уже
+# настроен, и не дёргает sudo. Версия берётся из env VERSION (в CI — тег без ведущей v).
 # Док: https://nfpm.goreleaser.com/configuration/
-name: clipmgr
+name: gnome-clipboard-history-native
 arch: amd64
 platform: linux
 version: ${VERSION}
@@ -15,7 +15,7 @@ maintainer: Eugene Tihonov <tihonov.ea@gmail.com>
 homepage: https://github.com/tihonove/gnome-clipboard-history-native
 license: MIT
 description: |
-  Clipboard history (Win+V) for GNOME on X11 and Wayland.
+  Clipboard history (Super+Ctrl+V) for GNOME on X11 and Wayland.
   TODO: развёрнутое описание для магазина/репозитория.
 
 # GTK3 — попап; gsettings (libglib2.0-bin) — чтобы --install прописал хоткей.
@@ -27,19 +27,19 @@ recommends:
   - xwayland
 
 contents:
-  - src: ./clipmgr-linux-x64
-    dst: /usr/bin/clipmgr
+  - src: ./gnome-clipboard-history-native-linux-x64
+    dst: /usr/bin/gnome-clipboard-history-native
     file_info:
       mode: 0755
   # udev-правило uaccess: доступ к /dev/uinput для активной сессии (Wayland-вставка).
   # Кладём в /usr/lib (вендорский путь пакета) — ровно pkgUdevRulePath из бинарника,
-  # поэтому `clipmgr --install` не эскалируется, правило уже на месте.
-  - src: ./packaging/udev/60-clipmgr-uinput.rules
-    dst: /usr/lib/udev/rules.d/60-clipmgr-uinput.rules
+  # поэтому `gnome-clipboard-history-native --install` не эскалируется, правило уже на месте.
+  - src: ./packaging/udev/60-gnome-clipboard-history-native-uinput.rules
+    dst: /usr/lib/udev/rules.d/60-gnome-clipboard-history-native-uinput.rules
     file_info:
       mode: 0644
-  - src: ./packaging/modules-load/clipmgr-uinput.conf
-    dst: /usr/lib/modules-load.d/clipmgr-uinput.conf
+  - src: ./packaging/modules-load/gnome-clipboard-history-native-uinput.conf
+    dst: /usr/lib/modules-load.d/gnome-clipboard-history-native-uinput.conf
     file_info:
       mode: 0644
 

@@ -1,6 +1,6 @@
 //go:build linux
 
-// client.go — «звонок» демону: clipmgr --show (его дёргает GNOME-хоткей).
+// client.go — «звонок» демону: gnome-clipboard-history-native --show (его дёргает GNOME-хоткей).
 package main
 
 import (

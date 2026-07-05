@@ -1,8 +1,8 @@
 //go:build linux
 
-// clipmgr — нативная история буфера обмена (Win+V) для GNOME/X11.
+// gnome-clipboard-history-native — нативная история буфера обмена (Super+Ctrl+V) для GNOME (X11 + Wayland).
 //
-// Резидентный GTK-демон. По Super+V (через GNOME-хоткей → clipmgr --show → сокет)
+// Резидентный GTK-демон. По Super+Ctrl+V (через GNOME-хоткей → --show → сокет)
 // показывает у курсора/окна попап: заголовок "Clipboard" + прокручиваемый список
 // записей. Каждая запись обрезается до 3 строк. Выделение — акцентная обводка
 // (Yaru accent) как фокус файла в Nautilus. Up/Down двигают выделение, Enter
@@ -46,22 +46,22 @@ func main() {
 			runRemoveInputPrivileged()
 			return
 		case "--version", "-v":
-			fmt.Println("clipmgr", version)
+			fmt.Println("gnome-clipboard-history-native", version)
 			return
 		case "--help", "-h":
-			fmt.Println("clipmgr — история буфера (Super+Ctrl+V) для GNOME (X11 + базовый Wayland)\n" +
-				"  clipmgr             запустить демона\n" +
-				"  clipmgr --install   прописать автозапуск и хоткей Super+Ctrl+V, запустить демона\n" +
-				"  clipmgr --uninstall убрать автозапуск и хоткей\n" +
-				"  clipmgr --setup-input  один раз настроить доступ к /dev/uinput для вставки (Wayland)\n" +
-				"  clipmgr --remove-input убрать udev-правило /dev/uinput\n" +
-				"  clipmgr --show      показать попап (вызывается хоткеем)\n" +
-				"  clipmgr --version   версия\n" +
+			fmt.Println("gnome-clipboard-history-native — история буфера (Super+Ctrl+V) для GNOME (X11 + базовый Wayland)\n" +
+				"  gnome-clipboard-history-native             запустить демона\n" +
+				"  gnome-clipboard-history-native --install   прописать автозапуск и хоткей Super+Ctrl+V, запустить демона\n" +
+				"  gnome-clipboard-history-native --uninstall убрать автозапуск и хоткей\n" +
+				"  gnome-clipboard-history-native --setup-input  один раз настроить доступ к /dev/uinput для вставки (Wayland)\n" +
+				"  gnome-clipboard-history-native --remove-input убрать udev-правило /dev/uinput\n" +
+				"  gnome-clipboard-history-native --show      показать попап (вызывается хоткеем)\n" +
+				"  gnome-clipboard-history-native --version   версия\n" +
 				"\n" +
 				"Wayland (GNOME): попап по центру, вставка через /dev/uinput (Shift+Insert),\n" +
 				"история — через XWayland-мост (mutter зеркалит буфер в X11 CLIPBOARD).\n" +
 				"  * доступ к /dev/uinput настраивается автоматически при --install\n" +
-				"    (или отдельно: clipmgr --setup-input; .deb кладёт udev-правило сам);\n" +
+				"    (или отдельно: gnome-clipboard-history-native --setup-input; .deb кладёт udev-правило сам);\n" +
 				"  * для истории нужен XWayland (обычно уже включён);\n" +
 				"  * переключение раскладки настроить через GNOME Tweaks (не Settings),\n" +
 				"    иначе модификаторы «съедаются» и хоткей/вставка ломаются на 2-й раскладке.")
