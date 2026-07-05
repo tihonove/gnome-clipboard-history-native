@@ -77,8 +77,11 @@ xsel -ob        # проверить, что в буфер попал текст
   - `client.go` — «звонок» `--show` (его дёргает GNOME-хоткей);
   - `install.go` — `--install`/`--uninstall`, gsettings-helpers;
   - `daemon.go` — резидентная часть: сокет, инициализация бэкенда, слушалка
-    буфера, история, `setClipboard`;
-  - `popup.go` — общее для бэкендов: CSS, конструктор содержимого `buildPopupBox()`;
+    буфера, ловля текста/картинок, `setClipboard`/`setClipboardImage`;
+  - `item.go` — модель записи истории `clipItem` (текст ИЛИ картинка), дедуп по
+    ключу, байтовый бюджет картинок, декод PNG→pixbuf;
+  - `popup.go` — общее для бэкендов: CSS, конструктор содержимого `buildPopupBox()`
+    (текст — Label, картинка — cover-рендер в `DrawingArea` через cairo);
   - `x11.go` — **X11-бэкенд**: попап у курсора, grab/poll, XTEST-вставка через
     запасной keycode, позиционирование;
   - `wayland.go` — **Wayland-бэкенд**: `isWayland()`, `showPopupWayland()`,
@@ -87,7 +90,8 @@ xsel -ob        # проверить, что в буфер попал текст
     (`--setup-input`/`--remove-input`): udev-правило + эскалация pkexec/sudo через
     ре-экзек своего же бинарника (скрытые `__setup-input-root`/`__remove-input-root`).
 - `internal/uinput/` — виртуальная клавиатура через `/dev/uinput` (вставка на
-  Wayland): `Init()`, `Close()`, `InjectPaste()`, `HasAccess()`, `DevPath`.
+  Wayland): `Init()`, `Close()`, `InjectPaste()`, `InjectPasteCtrlV()` (для картинок),
+  `HasAccess()`, `DevPath`.
 - `.golangci.yml` — конфиг golangci-lint (гоняется в CI; намеренные
   fire-and-forget вызовы исключены точечно — см. комментарии в конфиге).
 
@@ -149,15 +153,20 @@ xsel -ob        # проверить, что в буфер попал текст
 - **История — через XWayland-мост** (`startClipboardWatchWayland`). Фоновый wl-путь
   чужой буфер не видит (нет `data-control`), поэтому мониторим X11 CLIPBOARD, куда
   mutter зеркалит буфер: отдельное xgb-соединение к XWayland, XFIXES-уведомления о
-  смене владельца, значение читаем сами (`ConvertSelection`→`SelectionNotify`→
-  `GetProperty`, INCR пропускаем) — без внешних утилит, как CopyQ. Событийно (не
-  поллинг) — быстрые копирования не теряются. Отдельное соединение живёт в своей
-  горутине; `addToHistory` — через `glib.IdleAdd` (общий инвариант «X-вызовы
-  shared-конекта — из GTK-потока» не нарушается: это ОТДЕЛЬНЫЙ конект). Требует только
-  XWayland (`$DISPLAY`).
-- **self-set при вставке не двигает историю:** `setClipboard` метит текст
-  (`selfSetPending`/`selfSetText`), `ingestClipboard` его пропускает — выбранная запись
-  остаётся на месте. Общий путь для X11 (owner-change) и Wayland (XFIXES).
+  смене владельца. По уведомлению спрашиваем `TARGETS` и берём **текст** (`UTF8_STRING`)
+  либо **картинку** (`image/png`), читая значение сами (`ConvertSelection`→
+  `SelectionNotify`→`GetProperty`) — без внешних утилит, как CopyQ. **Крупные значения
+  (скриншоты) приходят по INCR** — читаем кусками (`readSelectionBytes`): свойство типа
+  `INCR` — маркер, его удаление сигналит владельцу слать куски, дальше на каждый —
+  `PropertyNotify(NewValue)`, пустой кусок = конец (нужен `EventMaskPropertyChange` на
+  окне-реквесторе). Событийно (не поллинг) — быстрые копирования не теряются. Отдельное
+  соединение живёт в своей горутине; `ingest*` — через `glib.IdleAdd` (общий инвариант
+  «X-вызовы shared-конекта — из GTK-потока» не нарушается: это ОТДЕЛЬНЫЙ конект).
+  Требует только XWayland (`$DISPLAY`).
+- **self-set при вставке не двигает историю:** `setClipboard`/`setClipboardImage` метят
+  запись хеш-ключом (`selfSetPending`/`selfSetKey`; текст vs картинка — общий механизм),
+  `ingestText`/`ingestImage` его пропускают — выбранная запись остаётся на месте. Общий
+  путь для X11 (owner-change) и Wayland (XFIXES).
 
 ### Общее
 - **Буфером владеет сам GTK-демон** (`clip.SetText`), пока жив; внешние `xsel`/`xdotool`

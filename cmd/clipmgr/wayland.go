@@ -59,13 +59,21 @@ func sessionKind() string {
 	return "x11"
 }
 
+// selectionAtoms — набор атомов X-селекшна, нужных мосту (интернируем один раз).
+type selectionAtoms struct {
+	clip, prop, targets, utf8, png, incr xproto.Atom
+}
+
+const maxSelBytes = maxImageBytes // предохранитель на размер одного чтения (в т.ч. INCR)
+
 // startClipboardWatchWayland — фоновый мониторинг буфера под GNOME Wayland через
 // XWayland. Штатный wl-путь чужие копирования в фоне не видит (нет data-control), но
 // mutter зеркалит Wayland-буфер в X11 CLIPBOARD, поэтому X-клиент получает XFIXES-
-// уведомления о смене владельца (в т.ч. от нативных Wayland-приложений). Значение
-// читаем сами (ConvertSelection→SelectionNotify→GetProperty) — так же, как это делает
-// CopyQ, без внешнего xsel. Отдельное xgb-соединение (не GTK), крутится в своей
-// горутине; addToHistory — через IdleAdd. Требует только наличия XWayland ($DISPLAY).
+// уведомления о смене владельца (в т.ч. от нативных Wayland-приложений). При смене
+// владельца спрашиваем TARGETS и берём текст (UTF8_STRING) либо картинку (image/png) —
+// так же, как CopyQ, без внешнего xsel. Крупные данные (скриншоты) приходят по INCR —
+// читаем их кусками (см. readSelectionBytes). Отдельное xgb-соединение (не GTK),
+// крутится в своей горутине; ingest — через IdleAdd. Требует только XWayland ($DISPLAY).
 func startClipboardWatchWayland() {
 	c, err := xgb.NewConn() // XWayland по $DISPLAY
 	if err != nil {
@@ -80,22 +88,28 @@ func startClipboardWatchWayland() {
 	xfixes.QueryVersion(c, 5, 0).Reply() // обязательный хендшейк перед вызовами xfixes
 	root := xproto.Setup(c).DefaultScreen(c).Root
 
-	clipAtom := internAtom(c, "CLIPBOARD")
-	utf8Atom := internAtom(c, "UTF8_STRING")
-	incrAtom := internAtom(c, "INCR")
-	propAtom := internAtom(c, "CLIPMGR_SEL") // куда владелец кладёт конвертированное значение
-	if clipAtom == 0 || utf8Atom == 0 || propAtom == 0 {
+	a := selectionAtoms{
+		clip:    internAtom(c, "CLIPBOARD"),
+		prop:    internAtom(c, "CLIPMGR_SEL"), // куда владелец кладёт конвертированное значение
+		targets: internAtom(c, "TARGETS"),
+		utf8:    internAtom(c, "UTF8_STRING"),
+		png:     internAtom(c, "image/png"),
+		incr:    internAtom(c, "INCR"),
+	}
+	if a.clip == 0 || a.prop == 0 || a.targets == 0 || a.utf8 == 0 {
 		log.Println("Wayland-история: не удалось получить атомы")
 		c.Close()
 		return
 	}
 
 	// Невидимое окно-реквестор: владелец шлёт ему SelectionNotify и кладёт данные в prop.
+	// PropertyChange нужен для INCR (ждём PropertyNotify на каждый кусок).
 	reqWin, _ := xproto.NewWindowId(c)
 	xproto.CreateWindow(c, 0, reqWin, root, 0, 0, 1, 1, 0,
-		xproto.WindowClassInputOnly, 0, 0, nil)
+		xproto.WindowClassInputOnly, 0, xproto.CwEventMask,
+		[]uint32{xproto.EventMaskPropertyChange})
 
-	xfixes.SelectSelectionInput(c, root, clipAtom, xfixes.SelectionEventMaskSetSelectionOwner)
+	xfixes.SelectSelectionInput(c, root, a.clip, xfixes.SelectionEventMaskSetSelectionOwner)
 	log.Println("Wayland-история: слежу за буфером через XWayland (XFIXES)")
 
 	go func() {
@@ -109,20 +123,51 @@ func startClipboardWatchWayland() {
 			}
 			switch e := ev.(type) {
 			case xfixes.SelectionNotifyEvent:
-				// владелец CLIPBOARD сменился → запросить текст в наше свойство
-				xproto.ConvertSelection(c, reqWin, clipAtom, utf8Atom, propAtom, e.SelectionTimestamp)
+				// владелец CLIPBOARD сменился → сперва спросить список доступных таргетов
+				xproto.ConvertSelection(c, reqWin, a.clip, a.targets, a.prop, e.SelectionTimestamp)
 			case xproto.SelectionNotifyEvent:
-				if e.Property == 0 { // владелец не отдал UTF8 (картинка/пусто)
+				if e.Property == 0 { // владелец не отдал запрошенный таргет
 					continue
 				}
-				txt, ok := readSelProp(c, reqWin, propAtom, incrAtom)
-				if !ok {
-					continue
-				}
-				glib.IdleAdd(func() bool { ingestText(txt); return false })
+				handleSelectionNotify(c, reqWin, a, e)
 			}
 		}
 	}()
+}
+
+// handleSelectionNotify обрабатывает ответ владельца на ConvertSelection. По e.Target
+// понимаем этап: TARGETS → выбираем текст/картинку и запрашиваем их; UTF8/png → читаем
+// значение (с поддержкой INCR) и кладём в историю. Вызывается из горутины моста.
+func handleSelectionNotify(c *xgb.Conn, win xproto.Window, a selectionAtoms, e xproto.SelectionNotifyEvent) {
+	switch e.Target {
+	case a.targets:
+		targets := readAtomList(c, win, a.prop)
+		switch {
+		case hasAtom(targets, a.utf8): // текст приоритетнее картинки
+			xproto.ConvertSelection(c, win, a.clip, a.utf8, a.prop, e.Time)
+		case a.png != 0 && hasAtom(targets, a.png):
+			xproto.ConvertSelection(c, win, a.clip, a.png, a.prop, e.Time)
+		}
+	case a.utf8:
+		data, ok := readSelectionBytes(c, win, a.prop, a.incr)
+		if !ok || !utf8.Valid(data) {
+			return
+		}
+		txt := string(data)
+		glib.IdleAdd(func() bool { ingestText(txt); return false })
+	case a.png:
+		data, ok := readSelectionBytes(c, win, a.prop, a.incr)
+		if !ok {
+			return
+		}
+		glib.IdleAdd(func() bool {
+			pix, err := pixbufFromPNG(data)
+			if err == nil && pix != nil {
+				ingestImage(data, pix)
+			}
+			return false
+		})
+	}
 }
 
 func internAtom(c *xgb.Conn, name string) xproto.Atom {
@@ -133,20 +178,71 @@ func internAtom(c *xgb.Conn, name string) xproto.Atom {
 	return r.Atom
 }
 
-// readSelProp читает и удаляет свойство prop окна win (результат ConvertSelection).
-// INCR (очень крупные данные) пропускаем — для истории буфера это не встречается.
-func readSelProp(c *xgb.Conn, win xproto.Window, prop, incrAtom xproto.Atom) (string, bool) {
+func hasAtom(list []xproto.Atom, a xproto.Atom) bool {
+	for _, x := range list {
+		if x == a {
+			return true
+		}
+	}
+	return false
+}
+
+// readAtomList читает и удаляет свойство-список атомов (ответ на ConvertSelection TARGETS).
+// Значения — 32-битные атомы; парсим через xgb.Get32 (учитывает порядок байт сервера).
+func readAtomList(c *xgb.Conn, win xproto.Window, prop xproto.Atom) []xproto.Atom {
+	r, err := xproto.GetProperty(c, true, win, prop, xproto.GetPropertyTypeAny, 0, 1<<16).Reply()
+	if err != nil || r == nil || r.Format != 32 {
+		return nil
+	}
+	out := make([]xproto.Atom, 0, len(r.Value)/4)
+	for i := 0; i+4 <= len(r.Value); i += 4 {
+		out = append(out, xproto.Atom(xgb.Get32(r.Value[i:])))
+	}
+	return out
+}
+
+// readSelectionBytes читает и удаляет свойство prop окна win (результат ConvertSelection),
+// возвращая сырые байты. Крупные значения приходят по INCR: свойство типа INCR — маркер
+// начала, само удаление свойства (delete=true) сигналит владельцу слать куски; дальше
+// на каждый кусок владелец шлёт PropertyNotify(NewValue), пустой кусок — конец передачи.
+// Вызывается синхронно из горутины моста, поэтому спокойно тянет события сама.
+func readSelectionBytes(c *xgb.Conn, win xproto.Window, prop, incrAtom xproto.Atom) ([]byte, bool) {
 	r, err := xproto.GetProperty(c, true, win, prop, xproto.GetPropertyTypeAny, 0, 1<<20).Reply()
 	if err != nil || r == nil || r.Type == 0 {
-		return "", false
+		return nil, false
 	}
-	if r.Type == incrAtom { // инкрементальная передача — пропускаем
-		return "", false
+	if r.Type != incrAtom {
+		if len(r.Value) == 0 {
+			return nil, false
+		}
+		return append([]byte(nil), r.Value...), true // Value переиспользуется — копируем
 	}
-	if len(r.Value) == 0 || !utf8.Valid(r.Value) {
-		return "", false
+	// INCR: собираем куски по PropertyNotify, пока не придёт пустой.
+	var buf []byte
+	for {
+		ev, werr := c.WaitForEvent()
+		if werr != nil {
+			continue
+		}
+		if ev == nil { // соединение закрыто
+			return nil, false
+		}
+		pn, ok := ev.(xproto.PropertyNotifyEvent)
+		if !ok || pn.Window != win || pn.Atom != prop || pn.State != xproto.PropertyNewValue {
+			continue // не наш кусок — посторонние события во время INCR игнорируем
+		}
+		cr, cerr := xproto.GetProperty(c, true, win, prop, xproto.GetPropertyTypeAny, 0, 1<<20).Reply()
+		if cerr != nil || cr == nil {
+			return nil, false
+		}
+		if len(cr.Value) == 0 { // пустой кусок — конец
+			return buf, len(buf) > 0
+		}
+		buf = append(buf, cr.Value...)
+		if len(buf) > maxSelBytes { // защита от разбухания
+			return nil, false
+		}
 	}
-	return string(r.Value), true
 }
 
 func showPopupWayland() {
