@@ -124,50 +124,11 @@ func startClipboardWatch() {
 	if err != nil {
 		log.Fatalf("clipboard: %v", err)
 	}
-	if isWayland() {
-		// Под GNOME Wayland фоновый GTK owner-change чужие копирования не видит
-		// (нет data-control). Историю снимаем через XWayland: mutter зеркалит буфер
-		// в X11 CLIPBOARD, и X-клиент получает XFIXES-уведомления — см. wayland.go.
-		startClipboardWatchWayland()
-		return
-	}
-	clipboard.Connect("owner-change", func() {
-		// WaitForText прямо в обработчике сигнала небезопасен (реентранси) —
-		// откладываем на следующий idle в том же GTK-потоке.
-		glib.IdleAdd(func() bool {
-			// Текст приоритетнее: картинку берём, только если текста нет
-			// (у копирования картинки текстового таргета обычно нет).
-			if txt, e := clipboard.WaitForText(); e == nil && txt != "" {
-				ingestText(txt)
-				return false
-			}
-			if clipboard.WaitIsImageAvailable() {
-				ingestClipboardImage()
-			}
-			return false
-		})
-	})
-}
-
-// ingestClipboardImage читает картинку из CLIPBOARD как сырые PNG-байты (для реотдачи
-// и дедупа) плюс полноразмерный pixbuf (для показа/вставки) и кладёт в историю.
-// Только X11: под Wayland картинку снимает XWayland-мост (см. wayland.go).
-// Вызывать только из главного GTK-потока.
-func ingestClipboardImage() {
-	sd, err := clipboard.WaitForContents(gdk.GdkAtomIntern("image/png", false))
-	if err != nil || sd == nil {
-		return
-	}
-	raw := sd.GetData() // zero-copy в C-память SelectionData — обязательно копируем перед хранением
-	if len(raw) == 0 {
-		return
-	}
-	png := append([]byte(nil), raw...)
-	pix, err := pixbufFromPNG(png)
-	if err != nil || pix == nil {
-		return
-	}
-	ingestImage(png, pix)
+	// GTK owner-change + WaitForContents("image/png") возвращает пустые данные для
+	// бинарных форматов (GetData len=0). Используем XFIXES+xgb напрямую — тот же
+	// механизм, что и для Wayland-бэкенда: читаем image/png через ConvertSelection
+	// без GTK-посредника. Работает и на X11, и на Wayland (оба подключены через $DISPLAY).
+	startClipboardWatchWayland()
 }
 
 // ingestText кладёт новый текст буфера в историю, пропуская наши собственные вставки
