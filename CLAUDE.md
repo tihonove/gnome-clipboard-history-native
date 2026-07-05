@@ -164,7 +164,9 @@ xsel -ob        # проверить, что в буфер попал текст
 Используем **Conventional Commits**. От типа зависит, попадёт ли коммит в
 changelog (его собирает git-cliff по `cliff.toml`).
 
-Формат: `type(scope): краткое описание` (описание — на русском, тип — на английском).
+Формат: `type(scope): short description`. **Сообщения коммитов пишем на английском**
+(заголовок и тело) — changelog собирается из них, поэтому релизы тоже выходят на
+английском.
 
 **Попадают в changelog** (пользовательские изменения):
 - `feat:` — новая функциональность → раздел «🚀 Features».
@@ -182,7 +184,8 @@ changelog (его собирает git-cliff по `cliff.toml`).
 — вручную так коммиты не оформлять.
 
 Прочее: коммиты — по смысловым блокам; тело объясняет «почему», не только «что».
-Комментарии в коде — на русском (как и весь проект).
+**Сообщения коммитов — на английском.** Комментарии в коде и документация
+(CLAUDE.md, ARCHITECTURE.md) остаются на русском (как и весь проект).
 
 ## Релизы
 
@@ -193,10 +196,54 @@ changelog (его собирает git-cliff по `cliff.toml`).
 1. Вручную запустить workflow **Bump Version** (`workflow_dispatch`, выбрать
    patch/minor/major) → он поднимает `VERSION`, коммитит `chore(release): vX.Y.Z`,
    ставит тег и пушит.
-2. Пуш тега `vX.Y.Z` триггерит **Release**: сборка бинарника (`build.yml`),
-   changelog за последний тег (git-cliff), публикация GitHub Release с артефактом
-   `clipmgr-linux-x64`.
+2. Пуш тега `vX.Y.Z` триггерит **Release** (`build → package → release → apt-repo`):
+   бинарник (`build.yml`), `.deb` (nfpm), changelog (git-cliff), GitHub Release
+   (бинарник + `.deb`) и публикация в apt-репозиторий — см. «Дистрибуция» ниже.
 
 Требуется секрет репозитория **`REPOSITORY_PAT`** (PAT с `contents:write`) — иначе
 пуш тега из bump-version не запустит release (ограничение GITHUB_TOKEN).
-`ci.yml` гоняет сборку/`go vet`/golangci-lint на push в main и PR.
+`ci.yml` гоняет сборку/`go vet`/golangci-lint на push в main и PR. **golangci-lint
+включает `gofmt`** — перед пушем прогоняй `gofmt -l .` (пусто = ок), иначе CI красный.
+
+## Дистрибуция (apt-репозиторий)
+
+Ставится через **свой подписанный apt-репозиторий на GitHub Pages** (ветка
+`gh-pages`), не PPA. Всё автоматизировано в `release.yml`.
+
+**Пакет (`nfpm`, `packaging/nfpm.yaml`):** кладёт бинарник в `/usr/bin/clipmgr` и
+**статическое udev-правило** (`uaccess`) в `/usr/lib/udev/rules.d/` — тот же
+`pkgUdevRulePath`, что проверяет `--setup-input`, поэтому `clipmgr --install` видит
+готовый доступ и не эскалируется. postinst только активирует udev
+(`modprobe`/`udevadm`); per-user часть (хоткей, автозапуск, старт демона) делает
+**`clipmgr --install`** уже в сессии — из root-postinst это невозможно (демона
+postinst НЕ запускает и `--install` НЕ зовёт: был баг с `/root`).
+
+**Релизный пайплайн** (`release.yml` по тегу): `build` (бинарник) → `package`
+(`.deb`) → `release` (GitHub Release: бинарник + `.deb` + changelog) и `apt-repo`
+(`reprepro` подписывает и пушит в `gh-pages`). reprepro держит одну версию (pool не
+пухнет), повторный тот же тег не роняет job.
+
+**Установка (юзеру):** оба скрипта тонкие (логика в бинарнике), **запускать без
+sudo** (сами эскалируются где надо), в конце зовут `clipmgr --install`:
+- apt + автообновления: `curl -fsSL <pages>/install.sh | sh`;
+- без apt: `curl -fsSL <pages>/install-standalone.sh | sh` (качает бинарник).
+
+**Разовая настройка репо (вне кода, руками в Settings):** секрет
+`APT_GPG_PRIVATE_KEY` (приватный ключ подписи; публичный экспортит CI); Pages →
+ветка `gh-pages` (появляется после первого релиза); Actions → Read and write
+permissions (иначе push в `gh-pages` падает).
+
+**Апдейт-грабля:** `apt upgrade` меняет файл на диске, но запущенный демон остаётся
+старым в памяти до рестарта/логина (postinst из root чужую сессию не рестартит).
+Наивный self-restart потерял бы in-memory историю — открытый вопрос, **issue #2**.
+
+### Дев-инстанс (тестить, не толкаясь с установленным)
+
+Демон — single-instance на сокете; параллельный дев поднимается через env
+(`sockPath`/`install.go`):
+- `CLIPMGR_SOCK` — свой сокет;
+- `CLIPMGR_NAME` — свой слот gsettings и **без автозапуска** (`isDevInstance`);
+- `CLIPMGR_HOTKEY` — своя клавиша; сокет прокидывается в команду хоткея.
+
+Раз: `CLIPMGR_SOCK=… CLIPMGR_HOTKEY='<Super><Control>b' CLIPMGR_NAME=clipmgr-dev
+./clipmgr-dev --install`. Дальше каждый сеанс просто: `CLIPMGR_SOCK=… ./clipmgr-dev`.
