@@ -1,0 +1,19 @@
+Origin: gnome-clipboard-history-native
+Label: gnome-clipboard-history-native
+Codename: stable
+Date: Sun, 05 Jul 2026 16:09:47 UTC
+Architectures: amd64
+Components: main
+Description: gnome-clipboard-history-native — clipboard history (Super+Ctrl+V) for GNOME
+MD5Sum:
+ 9afdc0d28e942b9fec1f3f3bb41d1ca2 753 main/binary-amd64/Packages
+ 324f35a24103e0e0d48b727c0a539f8b 528 main/binary-amd64/Packages.gz
+ d51ceb2afce43f5318bba1e9ba2bdc6c 204 main/binary-amd64/Release
+SHA1:
+ 368f65ca4502b25d0b767113179163a71d63784b 753 main/binary-amd64/Packages
+ 72bf37e776f2493645162b0f24fe9c5550c9f783 528 main/binary-amd64/Packages.gz
+ e7a974cf8edfba1d4e68e45229ad9961ae668444 204 main/binary-amd64/Release
+SHA256:
+ 15e8e9546db218bbf2bd5a7fe559c4927698b00f2f45360843316340c9f7548e 753 main/binary-amd64/Packages
+ 52eb81d5998f912277f6e5f386c283ed505c4915784e811a99f1aff49e8a3ad2 528 main/binary-amd64/Packages.gz
+ 88a048f51f6f182c0e93abdc73875affabef33c496759fcfd3eaa83e8641aeea 204 main/binary-amd64/Release

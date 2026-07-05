@@ -1,0 +1,5 @@
+Component: main
+Origin: gnome-clipboard-history-native
+Label: gnome-clipboard-history-native
+Architecture: amd64
+Description: gnome-clipboard-history-native — clipboard history (Super+Ctrl+V) for GNOME

@@ -1,0 +1,18 @@
+Package: gnome-clipboard-history-native
+Version: 0.5.0
+Architecture: amd64
+Maintainer: Eugene Tihonov <tihonov.ea@gmail.com>
+Installed-Size: 4912
+Depends: libgtk-3-0, libglib2.0-bin
+Recommends: xwayland
+Homepage: https://github.com/tihonove/gnome-clipboard-history-native
+Priority: optional
+Section: utils
+Filename: pool/main/g/gnome-clipboard-history-native/gnome-clipboard-history-native_0.5.0_amd64.deb
+Size: 1671992
+SHA256: 38b8135741aa6787620a71167014d1fbdb1208964fb6c810b2d325d9f483280f
+SHA1: 1a62b1c465b4015c07875eabe1de4bcc1313ade6
+MD5sum: be6d417bc52c055a70b9816d36c04369
+Description: Clipboard history (Super+Ctrl+V) for GNOME on X11 and Wayland.
+ TODO: развёрнутое описание для магазина/репозитория.
+
