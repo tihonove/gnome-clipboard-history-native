@@ -169,3 +169,8 @@ func InjectPaste() {
 	}
 	injectShiftInsert()
 }
+
+// InjectPasteCtrlV — принудительно Ctrl+V. Нужно для вставки картинки: Shift+Insert
+// в терминалах берёт PRIMARY (картинку туда не кладём), а GUI-приложения, куда
+// картинка и вставляется, понимают Ctrl+V.
+func InjectPasteCtrlV() { injectCtrlV() }

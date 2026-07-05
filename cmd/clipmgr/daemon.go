@@ -27,12 +27,12 @@ const maxHistory = 100 // сколько записей держим в памя
 var (
 	clipboard *gtk.Clipboard // CLIPBOARD: и слушаем, и владеем им при вставке
 	primary   *gtk.Clipboard // PRIMARY: нужен для вставки Shift+Insert в VTE-терминалы (Wayland)
-	history   []string       // история буфера, свежие сверху (только в памяти)
+	history   []*clipItem    // история буфера, свежие сверху (только в памяти)
 
 	// Когда мы сами кладём запись в буфер при вставке — не хотим двигать её наверх
-	// истории (выбранный элемент должен остаться на месте). Помечаем такой self-set,
-	// чтобы owner-change его пропустил.
-	selfSetText    string
+	// истории (выбранный элемент должен остаться на месте). Помечаем такой self-set
+	// ключом записи (общий для текста и картинки), чтобы owner-change/XFIXES его пропустил.
+	selfSetKey     string
 	selfSetPending bool
 )
 
@@ -135,41 +135,68 @@ func startClipboardWatch() {
 		// WaitForText прямо в обработчике сигнала небезопасен (реентранси) —
 		// откладываем на следующий idle в том же GTK-потоке.
 		glib.IdleAdd(func() bool {
-			if txt, e := clipboard.WaitForText(); e == nil {
-				ingestClipboard(txt)
+			// Текст приоритетнее: картинку берём, только если текста нет
+			// (у копирования картинки текстового таргета обычно нет).
+			if txt, e := clipboard.WaitForText(); e == nil && txt != "" {
+				ingestText(txt)
+				return false
+			}
+			if clipboard.WaitIsImageAvailable() {
+				ingestClipboardImage()
 			}
 			return false
 		})
 	})
 }
 
-// ingestClipboard кладёт новое содержимое буфера в историю, пропуская наши
-// собственные вставки (self-set) — чтобы выбранная запись не прыгала наверх.
+// ingestClipboardImage читает картинку из CLIPBOARD как сырые PNG-байты (для реотдачи
+// и дедупа) плюс полноразмерный pixbuf (для показа/вставки) и кладёт в историю.
+// Только X11: под Wayland картинку снимает XWayland-мост (см. wayland.go).
 // Вызывать только из главного GTK-потока.
-func ingestClipboard(txt string) {
-	if selfSetPending && txt == selfSetText {
+func ingestClipboardImage() {
+	sd, err := clipboard.WaitForContents(gdk.GdkAtomIntern("image/png", false))
+	if err != nil || sd == nil {
+		return
+	}
+	raw := sd.GetData() // zero-copy в C-память SelectionData — обязательно копируем перед хранением
+	if len(raw) == 0 {
+		return
+	}
+	png := append([]byte(nil), raw...)
+	pix, err := pixbufFromPNG(png)
+	if err != nil || pix == nil {
+		return
+	}
+	ingestImage(png, pix)
+}
+
+// ingestText кладёт новый текст буфера в историю, пропуская наши собственные вставки
+// (self-set) — чтобы выбранная запись не прыгала наверх. Вызывать только из GTK-потока.
+func ingestText(txt string) {
+	key := textKey(txt)
+	if selfSetPending && key == selfSetKey {
 		selfSetPending = false // это наша же вставка — порядок не трогаем
 		return
 	}
-	addToHistory(txt)
-}
-
-// addToHistory кладёт запись наверх истории (дедуп, лимит). Только текст, в памяти.
-func addToHistory(s string) {
-	if strings.TrimSpace(s) == "" {
+	if strings.TrimSpace(txt) == "" {
 		return
 	}
-	for i, e := range history { // дедуп: убрать старую позицию такой же записи
-		if e == s {
-			history = append(history[:i], history[i+1:]...)
-			break
-		}
+	addItem(&clipItem{kind: kindText, text: txt, key: key})
+}
+
+// ingestImage кладёт новую картинку в историю, пропуская наши self-set. png —
+// канонические байты (уже скопированные), pix — их декодированный pixbuf.
+// Вызывать только из главного GTK-потока.
+func ingestImage(png []byte, pix *gdk.Pixbuf) {
+	if len(png) == 0 || pix == nil {
+		return
 	}
-	history = append([]string{s}, history...) // свежее — сверху
-	if len(history) > maxHistory {
-		history = history[:maxHistory]
+	key := imageKey(png)
+	if selfSetPending && key == selfSetKey {
+		selfSetPending = false
+		return
 	}
-	log.Printf("history: %d записей", len(history))
+	addItem(&clipItem{kind: kindImage, png: png, pix: pix, key: key})
 }
 
 // setClipboard делает демона владельцем CLIPBOARD с текстом s. Пока демон жив, он
@@ -178,9 +205,20 @@ func addToHistory(s string) {
 // следом owner-change с этим текстом не должен двигать запись наверх истории.
 func setClipboard(s string) {
 	if clipboard != nil {
-		selfSetText = s
+		selfSetKey = textKey(s)
 		selfSetPending = true
 		clipboard.SetText(s)
+	}
+}
+
+// setClipboardImage делает демона владельцем CLIPBOARD с картинкой pix (GTK сам отдаёт
+// image/png по запросу вставляющего приложения). png нужен только для self-set-метки:
+// пришедший следом owner-change с той же картинкой не должен двигать запись наверх.
+func setClipboardImage(png []byte, pix *gdk.Pixbuf) {
+	if clipboard != nil && pix != nil {
+		selfSetKey = imageKey(png)
+		selfSetPending = true
+		clipboard.SetImage(pix)
 	}
 }
 

@@ -119,7 +119,7 @@ func startClipboardWatchWayland() {
 				if !ok {
 					continue
 				}
-				glib.IdleAdd(func() bool { ingestClipboard(txt); return false })
+				glib.IdleAdd(func() bool { ingestText(txt); return false })
 			}
 		}
 	}()
@@ -225,11 +225,11 @@ func finishWayland(paste bool) {
 	w := win
 	win = nil
 
-	text := ""
+	var it *clipItem
 	if paste && listBox != nil {
 		if r := listBox.GetSelectedRow(); r != nil {
 			if idx := r.GetIndex(); idx >= 0 && idx < len(history) {
-				text = history[idx]
+				it = history[idx]
 			}
 		}
 	}
@@ -244,16 +244,29 @@ func finishWayland(paste bool) {
 	// Кладём и в CLIPBOARD, и в PRIMARY: вставляем через Shift+Insert, а VTE-терминалы
 	// по нему берут PRIMARY, а не CLIPBOARD (GUI-поля берут CLIPBOARD). Без PRIMARY в
 	// консоль вставлялась бы старая мышиная выделенка, а не выбранная запись.
-	if paste && text != "" {
-		setClipboard(text)
-		setPrimary(text)
+	paste = paste && it != nil
+	if paste {
+		if it.kind == kindImage {
+			// Картинку кладём только в CLIPBOARD (PRIMARY/терминалы её не берут) и
+			// вставляем Ctrl+V — Shift+Insert для картинки бессмысленен.
+			setClipboardImage(it.png, it.pix)
+		} else {
+			// Текст — в оба селекшна: Shift+Insert в GUI берёт CLIPBOARD, в VTE — PRIMARY.
+			setClipboard(it.text)
+			setPrimary(it.text)
+		}
 	}
 
 	w.Destroy()
 
-	if paste && text != "" {
+	if paste {
+		img := it.kind == kindImage
 		glib.TimeoutAdd(wlPasteDelayMs, func() bool {
-			uinput.InjectPaste()
+			if img {
+				uinput.InjectPasteCtrlV()
+			} else {
+				uinput.InjectPaste()
+			}
 			return false
 		})
 	}

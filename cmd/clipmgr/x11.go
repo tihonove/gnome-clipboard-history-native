@@ -204,16 +204,21 @@ func finish(paste bool) {
 	xproto.UngrabKeyboard(X.Conn(), xproto.TimeCurrentTime)
 	xproto.UngrabPointer(X.Conn(), xproto.TimeCurrentTime)
 
-	text := ""
+	var it *clipItem
 	if paste && selIdx >= 0 && selIdx < len(history) {
-		text = history[selIdx]
+		it = history[selIdx]
 	}
 	w.Hide()                               // мгновенно убрать окно с экрана (Destroy — тяжелее, делаем после вставки)
 	xproto.GetInputFocus(X.Conn()).Reply() // дождаться обработки ungrab до вставки
 
-	if paste && text != "" {
-		setClipboard(text)
-		pasteInto(isTerminal(targetWin)) // терминалам — Ctrl+Shift+V, остальным — Ctrl+V
+	if it != nil {
+		if it.kind == kindImage {
+			setClipboardImage(it.png, it.pix)
+			pasteInto(false) // картинку вставляем Ctrl+V; терминалы её не берут
+		} else if it.text != "" {
+			setClipboard(it.text)
+			pasteInto(isTerminal(targetWin)) // терминалам — Ctrl+Shift+V, остальным — Ctrl+V
+		}
 	}
 	listBox = nil
 	scrolled = nil

@@ -21,6 +21,8 @@ linters:
         - (*os/exec.Cmd).Run
         - (github.com/jezek/xgb/xproto.GetInputFocusCookie).Reply
         - (github.com/jezek/xgb/xfixes.QueryVersionCookie).Reply
+        # gdk-pixbuf loader Close: pixbuf уже получен из WriteAndReturnPixbuf
+        - (*github.com/gotk3/gotk3/gdk.PixbufLoader).Close
 
 formatters:
   enable:

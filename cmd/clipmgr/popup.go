@@ -6,8 +6,10 @@ package main
 
 import (
 	"log"
+	"math"
 	"strings"
 
+	"github.com/gotk3/gotk3/cairo"
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/gtk"
 	"github.com/gotk3/gotk3/pango"
@@ -17,7 +19,8 @@ const (
 	listW    = 340 // ширина списка (без учёта рамки/тени)
 	popupW   = 372 // оценка полного размера окна (для позиционирования)
 	popupH   = 360
-	pageStep = 3 // на сколько прыгать по PageUp/PageDown (≈ число видимых строк)
+	pageStep = 3  // на сколько прыгать по PageUp/PageDown (≈ число видимых строк)
+	rowH     = 56 // фикс. высота контента строки (≈ 3 текстовые строки); картинку рисуем cover в этот размер
 )
 
 const cssData = `
@@ -102,14 +105,7 @@ func buildPopupBox() *gtk.Box {
 	listBox, _ = gtk.ListBoxNew()
 	listBox.SetSelectionMode(gtk.SELECTION_BROWSE)
 	for _, it := range history {
-		lbl, _ := gtk.LabelNew(displayText(it))
-		lbl.SetXAlign(0)
-		lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
-		lbl.SetVAlign(gtk.ALIGN_FILL)
-		lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
-		lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
-		lbl.SetMaxWidthChars(42)
-		listBox.Add(lbl)
+		listBox.Add(rowWidget(it))
 	}
 
 	scrolled, _ = gtk.ScrolledWindowNew(nil, nil)
@@ -128,7 +124,57 @@ func addClass(w interface {
 	}
 }
 
-// displayText приводит запись РОВНО к 3 строкам: длинные обрезает (с «…»),
+// rowWidget строит виджет содержимого одной строки списка: для текста — Label
+// (обрезка до 3 строк, см. displayText), для картинки — DrawingArea с cover-рендером.
+// Высота фиксирована (rowH) для обоих видов, чтобы строки были одинаковыми.
+func rowWidget(it *clipItem) gtk.IWidget {
+	if it.kind == kindImage {
+		return imageRow(it.pix)
+	}
+	lbl, _ := gtk.LabelNew(displayText(it.text))
+	lbl.SetXAlign(0)
+	lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
+	lbl.SetVAlign(gtk.ALIGN_FILL)
+	lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
+	lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
+	lbl.SetMaxWidthChars(42)
+	lbl.SetSizeRequest(-1, rowH) // та же высота, что у картинок
+	return lbl
+}
+
+// imageRow рисует превью картинки в фиксированный прямоугольник строки методом cover:
+// масштаб «на заполнение» (max из коэффициентов ширины/высоты), центрирование, обрезка
+// краёв по границе строки (Clip). Это overflow:hidden — картинка заливает всю строку.
+func imageRow(pix *gdk.Pixbuf) gtk.IWidget {
+	da, _ := gtk.DrawingAreaNew()
+	da.SetSizeRequest(-1, rowH) // ширину растянет строка, высота фиксирована
+	da.SetHExpand(true)
+	da.Connect("draw", func(_ *gtk.DrawingArea, cr *cairo.Context) bool {
+		if pix == nil {
+			return false
+		}
+		w := float64(da.GetAllocatedWidth())
+		h := float64(da.GetAllocatedHeight())
+		pw := float64(pix.GetWidth())
+		ph := float64(pix.GetHeight())
+		if pw <= 0 || ph <= 0 {
+			return false
+		}
+		cr.Save()
+		cr.Rectangle(0, 0, w, h)
+		cr.Clip() // всё вне строки обрезаем
+		scale := math.Max(w/pw, h/ph)
+		cr.Translate((w-pw*scale)/2, (h-ph*scale)/2) // центрируем обрезаемую картинку
+		cr.Scale(scale, scale)
+		gtk.GdkCairoSetSourcePixBuf(cr, pix, 0, 0)
+		cr.Paint()
+		cr.Restore()
+		return false
+	})
+	return da
+}
+
+// displayText приводит текст записи РОВНО к 3 строкам: длинные обрезает (с «…»),
 // короткие дополняет пустыми строками. Тогда высота каждого элемента одинаковая
 // и равна ровно 3 строкам (полный текст храним в history и вставляем целиком).
 func displayText(s string) string {
