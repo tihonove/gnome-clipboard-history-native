@@ -1,0 +1,44 @@
+name: Deploy Pages (manual)
+
+# Ручной передеплой текущего состояния apt-репозитория из ветки gh-pages на Pages
+# через Actions (build_type=workflow), без нового релиза. Нужен для:
+#  - разового cutover-деплоя при переключении legacy → workflow (чтобы сайт не лёг);
+#  - экстренного передеплоя, если live-сайт разошёлся с веткой gh-pages.
+# Штатный деплой при релизе делает release.yml (джоба apt-repo) — этот воркфлоу его НЕ дублирует.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+
+      # Обслуживаем только dists/ + pool/ + статику; conf/, db/ и .git не сервим.
+      - name: Assemble servable site
+        run: |
+          mkdir _site
+          rsync -a --exclude='.git' --exclude='conf' --exclude='db' --exclude='_site' \
+            ./ _site/
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

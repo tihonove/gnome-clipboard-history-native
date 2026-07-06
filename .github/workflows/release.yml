@@ -82,14 +82,24 @@ jobs:
           body: ${{ steps.cliff.outputs.content }}
           files: artifacts/*
 
-  # Опубликовать .deb в apt-репозиторий на ветке gh-pages (reprepro + подпись).
-  # Ветка gh-pages — персистентное состояние репозитория (pool/db/dists копятся).
+  # Опубликовать .deb в apt-репозиторий и задеплоить сайт на GitHub Pages.
+  # Ветка gh-pages — ТОЛЬКО персистентное состояние reprepro (pool/db/dists копятся);
+  # обслуживание сайта — через Actions-деплой (build_type=workflow), НЕ сервинг ветки.
+  # Одна джоба делает всё: reprepro → push состояния в gh-pages → upload+deploy артефакта.
   apt-repo:
     needs: package
     runs-on: ubuntu-latest
     permissions:
-      contents: write # git push в ветку gh-pages
-      pages: write # ретриггер сборки Pages (POST /pages/builds), см. шаг verify
+      contents: write # git push состояния в ветку gh-pages
+      pages: write # actions/deploy-pages
+      id-token: write # OIDC для actions/deploy-pages
+    # Один активный деплой Pages за раз (релизы и так последовательны).
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4 # main: шаблоны из packaging/apt
 
@@ -137,52 +147,37 @@ jobs:
           reprepro -b pages includedeb stable debs/*.deb
           reprepro -b pages list stable
 
-      - name: Publish gh-pages
+      # Запушить обновлённое состояние reprepro в gh-pages (стейт-стор, не сервинг).
+      # No-op-терпимо: ре-ран того же тега / повторный deb не меняют дерево — это ОК,
+      # а не ошибка (раньше пустой `git commit` ронял всю джобу).
+      - name: Publish gh-pages state
         run: |
           cd pages
           git add -A
-          git -c user.name="github-actions[bot]" \
-              -c user.email="github-actions[bot]@users.noreply.github.com" \
-              commit -m "apt: publish ${GITHUB_REF_NAME}"
-          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" \
-              HEAD:gh-pages
-
-      # Публикацию из ветки в live-сайт делает отдельный GitHub-воркфлоу
-      # «pages build and deployment» — он иногда флачит транзиентно
-      # (`Deployment failed, try again later`) без авто-ретрая, и apt тихо
-      # застревает на старой версии. Здесь ждём, пока сайт реально начнёт отдавать
-      # свежую версию, и до 5 раз передёргиваем сборку Pages (POST /pages/builds).
-      # Если и после этого не опубликовалось — валим ЭТУ джобу, чтобы флак был виден.
-      - name: Verify Pages published (retry deploy on flake)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BASE="$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq .html_url 2>/dev/null || true)"
-          BASE="${BASE%/}"
-          if [ -z "$BASE" ]; then
-            echo "::warning::не удалось получить html_url Pages из API — строю URL по owner/repo"
-            BASE="https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}"
+          if git diff --cached --quiet; then
+            echo "apt-репозиторий без изменений — пуш не нужен (деплой всё равно выполним)"
+          else
+            git -c user.name="github-actions[bot]" \
+                -c user.email="github-actions[bot]@users.noreply.github.com" \
+                commit -m "apt: publish ${GITHUB_REF_NAME}"
+            git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" \
+                HEAD:gh-pages
           fi
-          URL="$BASE/dists/stable/main/binary-amd64/Packages"
-          echo "Жду, пока $URL начнёт отдавать Version: $VERSION"
 
-          published() {
-            # ?cb= — обход кэша Fastly, чтобы не поймать старую версию из CDN
-            curl -fsSL "$URL?cb=${RANDOM}${1}" 2>/dev/null | grep -qx "Version: $VERSION"
-          }
+      # Собрать обслуживаемое дерево: только то, что нужно клиентам apt
+      # (dists/ + pool/) и статика. Внутренности reprepro (conf/, db/) и .git НЕ сервим.
+      - name: Assemble servable site
+        run: |
+          mkdir _site
+          rsync -a --exclude='.git' --exclude='conf' --exclude='db' --exclude='_site' \
+            pages/ _site/
 
-          for attempt in 1 2 3 4 5; do
-            for w in $(seq 1 9); do
-              if published "$attempt-$w"; then
-                echo "✓ Pages отдаёт $VERSION (попытка $attempt)"
-                exit 0
-              fi
-              sleep 10
-            done
-            echo "::warning::Pages ещё не отдаёт $VERSION — триггерю пересборку ($attempt/5)"
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/pages/builds" >/dev/null 2>&1 || true
-          done
-
-          echo "::error::Pages не опубликовал $VERSION после 5 ретраев — проверь вручную." >&2
-          exit 1
+      # Синхронный деплой через Actions (build_type=workflow) — статус виден в ЭТОМ
+      # прогоне, без отдельного флакающего воркфлоу «pages build and deployment».
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
