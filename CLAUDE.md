@@ -258,7 +258,13 @@ sudo** (сами эскалируются где надо), в конце зов
 **Разовая настройка репо (вне кода, руками в Settings):** секрет
 `APT_GPG_PRIVATE_KEY` (приватный ключ подписи; публичный экспортит CI); Pages →
 **Source: GitHub Actions** (`build_type=workflow`, не «Deploy from a branch»);
-Actions → Read and write permissions (иначе push в `gh-pages` падает).
+Actions → Read and write permissions (иначе push в `gh-pages` падает). **Окружение
+`github-pages` должно разрешать деплой с тегов**: релиз идёт с тега `vX.Y.Z`, а
+дефолтная политика окружения пускает только ветки — без тег-политики `apt-repo`
+падает на «Tag … is not allowed to deploy to github-pages». Добавить паттерн:
+`gh api -X POST repos/OWNER/REPO/environments/github-pages/deployment-branch-policies
+-f name='v*.*.*' -f type=tag` (или в Settings → Environments → github-pages →
+Deployment branch and tags → добавить тег-правило `v*.*.*`).
 
 **Апдейт-грабля:** `apt upgrade` меняет файл на диске, но запущенный демон остаётся
 старым в памяти до рестарта/логина (postinst из root чужую сессию не рестартит).
