@@ -1,4 +1,4 @@
-# Clipboard history for GNOME <img src="docs/img/keyboard-shortcut.png" alt="Super + Ctrl + V" width="320">
+# Clipboard history for GNOME
 
 Clipboard history for **Ubuntu (GNOME)** — a `Win+V` equivalent. A native GTK daemon
 styled after **Yaru** that works on **Wayland and X11**. On `Super+Ctrl+V` it shows a
