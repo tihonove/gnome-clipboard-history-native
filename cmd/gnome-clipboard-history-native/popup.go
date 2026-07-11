@@ -51,6 +51,13 @@ list row:selected {
   /* selected — Yaru accent on top of the gray border */
   border-color: @theme_selected_bg_color;
   background-color: alpha(@theme_selected_bg_color, 0.16);
+  /* keep the normal fg color: the default selected state paints text with
+     @theme_selected_fg_color (white), which is invisible on our light,
+     translucent-accent background. */
+  color: @theme_fg_color;
+}
+list row:selected label {
+  color: @theme_fg_color;
 }
 .clip-empty {
   padding: 28px 18px;
