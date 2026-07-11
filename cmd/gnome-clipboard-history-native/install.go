@@ -35,11 +35,16 @@ func hotkeyName() string {
 	return "gnome-clipboard-history-native"
 }
 
+// hotkeyBinding resolves the GNOME accelerator: GCHN_HOTKEY (dev override) wins, then the
+// config file (config.{json,yaml,toml}), then the built-in default. See config.go.
 func hotkeyBinding() string {
 	if b := os.Getenv("GCHN_HOTKEY"); b != "" {
 		return b
 	}
-	return "<Super><Control>v"
+	if b := configHotkey(); b != "" {
+		return b
+	}
+	return defaultHotkey
 }
 
 // isDevInstance — whether GCHN_NAME is set (dev). The dev instance has no autostart: the daemon
@@ -61,6 +66,7 @@ func runInstall() {
 	exe := resolveExe()
 	installAutostart(exe)
 	installHotkey(exe)
+	writeDefaultConfig() // starter config.yaml the user can edit; daemon applies it live
 	startDaemon(exe)
 	// Wayland: paste goes through /dev/uinput. If there's no access and the rule hasn't
 	// been placed by the package yet — set it up once (runSetupInput escalates itself and

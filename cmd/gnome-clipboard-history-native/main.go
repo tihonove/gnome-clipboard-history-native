@@ -58,6 +58,10 @@ func main() {
 				"  gnome-clipboard-history-native --show      show the popup (invoked by the hotkey)\n" +
 				"  gnome-clipboard-history-native --version   version\n" +
 				"\n" +
+				"Hotkey is configurable via ~/.config/gnome-clipboard-history-native/config.{json,yaml,toml}\n" +
+				"(field \"hotkey\", GNOME accelerator syntax, e.g. <Super>v). Edits apply live —\n" +
+				"the daemon re-registers the binding in GNOME without a restart.\n" +
+				"\n" +
 				"Wayland (GNOME): centered popup, pasting via /dev/uinput (Shift+Insert),\n" +
 				"history via an XWayland bridge (mutter mirrors the buffer to the X11 CLIPBOARD).\n" +
 				"  * /dev/uinput access is set up automatically on --install\n" +

@@ -78,6 +78,7 @@ func runDaemon() {
 	applyCSS()
 	startClipboardWatch()
 	startSocketListener()
+	watchConfig() // live hotkey reload from ~/.config/<name>/config.{json,yaml,toml}
 
 	log.Printf("daemon (GTK, %s): listening on socket %s — waiting for --show", sessionKind(), sockPath())
 	gtk.Main()

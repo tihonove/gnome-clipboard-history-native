@@ -81,6 +81,9 @@ Module — `github.com/tihonove/gnome-clipboard-history-native`.
   - `main.go` — entry point, flag dispatch, `version`;
   - `client.go` — the `--show` "call" (triggered by the GNOME hotkey);
   - `install.go` — `--install`/`--uninstall`, gsettings helpers;
+  - `config.go` — user config (the `hotkey`) via viper (json/yaml/toml); live reload by
+    watching the config dir with fsnotify (`watchConfig`), starter file
+    (`writeDefaultConfig`);
   - `daemon.go` — the resident part: socket, backend initialization, clipboard
     watcher, text/image capture, `setClipboard`/`setClipboardImage`;
   - `item.go` — the history entry model `clipItem` (text OR image), dedup by key,
@@ -103,7 +106,19 @@ Module — `github.com/tihonove/gnome-clipboard-history-native`.
 ## Invariants and pitfalls (do NOT regress)
 
 - **Hotkey — only through GNOME** (gsettings), not XGrabKey. mutter holds Super.
-  The binding is `Super+Ctrl+V` (`hotkeyBinding`). Works on both X11 and Wayland.
+  The binding is resolved by `hotkeyBinding()`: env `GCHN_HOTKEY` (dev override) →
+  config file → default `<Super><Control>v` (`defaultHotkey`). Works on X11 and Wayland.
+- **Hotkey is user-configurable, live** (`config.go`). Read via **viper** so
+  `~/.config/<name>/config.{json,yaml,yml,toml}` all work (format by extension) —
+  field `hotkey`. The daemon watches the config **directory** (fsnotify in
+  `watchConfig`, called from `runDaemon`), NOT `viper.WatchConfig` — a directory watch is
+  what makes appear/delete/format-swap robust: on any event it recomputes
+  `hotkeyBinding()` and, if changed, re-runs `installHotkey` (which shells out to
+  gsettings; mutter applies it instantly — no restart/relogin). Deleting the file reverts
+  to the default. A broken/missing config must NEVER crash: `configHotkey()` swallows
+  parse errors (returns `""`) and the whole watch path only `log.Printf`s on failure —
+  never `log.Fatal`. Dev instances (`GCHN_HOTKEY` set) ignore the file entirely.
+  `--install` drops a starter `config.yaml` via `writeDefaultConfig()`.
 - **Two backends, chosen at runtime** via `isWayland()`. The branch is at exactly
   two seams: initialization in `runDaemon` and the `show` dispatch. X11 functions
   (grab/poll/XTEST/spare/positioning/isTerminal) are NOT called on Wayland, and
