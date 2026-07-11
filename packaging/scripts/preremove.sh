@@ -1,7 +1,7 @@
 #!/bin/sh
-# udev-правило и modules-load — обычные файлы пакета, их удалит сам dpkg. Тут только
-# перечитываем udev, чтобы правило перестало действовать сразу. Per-user настройку
-# (автозапуск/хоткей) юзер снимает сам через `gnome-clipboard-history-native --uninstall` из своей сессии.
+# The udev rule and modules-load are ordinary package files; dpkg removes them itself. Here we
+# only reload udev so the rule stops taking effect immediately. The per-user setup
+# (autostart/hotkey) is removed by the user via `gnome-clipboard-history-native --uninstall` from their session.
 set -e
 
 udevadm control --reload-rules 2>/dev/null || true

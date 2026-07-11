@@ -1,8 +1,8 @@
 //go:build linux
 
-// x11.go — X11-бэкенд целиком: попап у курсора (override-redirect), захват
-// клавиатуры через xgb-grab на root с поллингом, вставка нативным XTEST через
-// запасной keycode и позиционирование окна.
+// x11.go — the entire X11 backend: popup at the cursor (override-redirect), keyboard
+// capture via an xgb grab on root with polling, pasting via native XTEST through
+// a spare keycode, and window positioning.
 package main
 
 import (
@@ -26,23 +26,23 @@ var (
 	ctrlKey  xproto.Keycode
 	vKey     xproto.Keycode
 	shiftKey xproto.Keycode
-	spareKey xproto.Keycode // запасной keycode для layout-независимой вставки
-	spareKPK byte           // keysyms-per-keycode сервера (глобальное)
+	spareKey xproto.Keycode // spare keycode for layout-independent pasting
+	spareKPK byte           // server's keysyms-per-keycode (global)
 
 	selIdx         int
 	targetWin      xproto.Window
-	popupX, popupY int // куда поставили окно (для проверки клика мимо)
+	popupX, popupY int // where the window was placed (to detect clicks outside)
 
 	grabTries int
 )
 
-// ---------- попап ----------
+// ---------- popup ----------
 
 func showPopup() {
 	if win != nil {
 		return
 	}
-	setupSpareKey() // пока попап открыт: 'v' на запасном keycode (приложения успеют подхватить keymap)
+	setupSpareKey() // while the popup is open: 'v' on the spare keycode (apps have time to pick up the keymap)
 	if tw, err := ewmh.ActiveWindowGet(X); err == nil {
 		targetWin = tw
 	}
@@ -54,7 +54,7 @@ func showPopup() {
 	}
 	w.SetKeepAbove(true)
 	w.SetResizable(false)
-	// RGBA-визуал → прозрачные углы, чтобы скруглить окно (если есть композитор).
+	// RGBA visual → transparent corners so the window can be rounded (if a compositor is present).
 	if screen, err := gdk.ScreenGetDefault(); err == nil && screen.IsComposited() {
 		if vis, err := screen.GetRGBAVisual(); err == nil && vis != nil {
 			w.SetVisual(vis)
@@ -83,7 +83,7 @@ func showPopup() {
 	})
 }
 
-// insidePopup — попал ли клик (в координатах экрана) в прямоугольник окна попапа.
+// insidePopup reports whether a click (in screen coordinates) landed inside the popup window's rectangle.
 func insidePopup(x, y int) bool {
 	if win == nil {
 		return false
@@ -92,7 +92,7 @@ func insidePopup(x, y int) bool {
 	return x >= popupX && x < popupX+w && y >= popupY && y < popupY+h
 }
 
-// setSel зажимает индекс в [0, len-1] и, если он изменился, обновляет выделение.
+// setSel clamps the index to [0, len-1] and, if it changed, updates the selection.
 func setSel(i int) {
 	if i < 0 {
 		i = 0
@@ -115,9 +115,9 @@ func updateSelection() {
 		return
 	}
 	listBox.SelectRow(row)
-	row.GrabFocus() // GtkScrolledWindow подтягивает сфокусированного ребёнка в видимую зону
+	row.GrabFocus() // GtkScrolledWindow scrolls the focused child into the visible area
 
-	// Подстраховка-скролл вручную (на случай, если фокус не двигает вьюпорт).
+	// Manual fallback scroll (in case focus doesn't move the viewport).
 	if scrolled != nil {
 		alloc := row.GetAllocation()
 		vadj := scrolled.GetVAdjustment()
@@ -135,7 +135,7 @@ func tryGrab() {
 	gk, err := xproto.GrabKeyboard(X.Conn(), false, X.RootWin(), xproto.TimeCurrentTime,
 		xproto.GrabModeAsync, xproto.GrabModeAsync).Reply()
 	if err == nil && gk.Status == xproto.GrabStatusSuccess {
-		// Захватываем и указатель — чтобы ловить клики мимо окна и закрываться.
+		// Grab the pointer too — to catch clicks outside the window and close.
 		xproto.GrabPointer(X.Conn(), false, X.RootWin(),
 			uint16(xproto.EventMaskButtonPress),
 			xproto.GrabModeAsync, xproto.GrabModeAsync,
@@ -145,7 +145,7 @@ func tryGrab() {
 	}
 	grabTries++
 	if grabTries >= 100 {
-		log.Println("не удалось захватить клавиатуру — закрываю")
+		log.Println("could not grab the keyboard — closing")
 		finish(false)
 		return
 	}
@@ -184,7 +184,7 @@ func startKeyPoll() {
 				}
 			case xproto.ButtonPressEvent:
 				if !insidePopup(int(e.RootX), int(e.RootY)) {
-					finish(false) // клик мимо окна — закрыть
+					finish(false) // click outside the window — close
 				}
 			}
 			if win == nil {
@@ -208,27 +208,27 @@ func finish(paste bool) {
 	if paste && selIdx >= 0 && selIdx < len(history) {
 		it = history[selIdx]
 	}
-	w.Hide()                               // мгновенно убрать окно с экрана (Destroy — тяжелее, делаем после вставки)
-	xproto.GetInputFocus(X.Conn()).Reply() // дождаться обработки ungrab до вставки
+	w.Hide()                               // remove the window from screen instantly (Destroy is heavier; do it after pasting)
+	xproto.GetInputFocus(X.Conn()).Reply() // wait for the ungrab to be processed before pasting
 
 	if it != nil {
 		if it.kind == kindImage {
 			setClipboardImage(it.png, it.pix)
-			pasteInto(false) // картинку вставляем Ctrl+V; терминалы её не берут
+			pasteInto(false) // paste images with Ctrl+V; terminals don't take them
 		} else if it.text != "" {
 			setClipboard(it.text)
-			pasteInto(isTerminal(targetWin)) // терминалам — Ctrl+Shift+V, остальным — Ctrl+V
+			pasteInto(isTerminal(targetWin)) // terminals get Ctrl+Shift+V, everything else Ctrl+V
 		}
 	}
 	listBox = nil
 	scrolled = nil
-	// Тяжёлый teardown окна — отложенно, чтобы главный цикл сначала отдал буфер
-	// вставляющему приложению (SelectionRequest), а не ждал разрушения виджетов.
+	// Heavy window teardown is deferred so the main loop first hands the clipboard
+	// to the pasting application (SelectionRequest) instead of waiting on widget destruction.
 	glib.IdleAdd(func() bool { w.Destroy(); return false })
 
-	// Вернуть запасной keycode в NoSymbol (иначе mutter резолвит Super+V на него).
-	// С задержкой — чтобы приложения успели обработать нажатие вставки; и только
-	// если попап не открыли снова.
+	// Return the spare keycode to NoSymbol (otherwise mutter resolves Super+V to it).
+	// With a delay — so applications have time to process the paste keypress; and only
+	// if the popup hasn't been opened again.
 	glib.TimeoutAdd(300, func() bool {
 		if win == nil {
 			restoreSpareKey()
@@ -237,9 +237,9 @@ func finish(paste bool) {
 	})
 }
 
-// isTerminal определяет, что целевое окно — терминал (по WM_CLASS). Нужно, чтобы
-// выбрать комбинацию вставки: терминалы вставляют по Ctrl+Shift+V, а обычные
-// GUI-поля — по Ctrl+V.
+// isTerminal determines whether the target window is a terminal (by WM_CLASS). Needed to
+// pick the paste combination: terminals paste with Ctrl+Shift+V, while ordinary
+// GUI fields use Ctrl+V.
 func isTerminal(w xproto.Window) bool {
 	if w == 0 {
 		return false
@@ -253,7 +253,7 @@ func isTerminal(w xproto.Window) bool {
 
 func isTermClass(s string) bool {
 	if strings.Contains(s, "terminal") || strings.Contains(s, "console") {
-		return true // gnome-terminal, xfce4-terminal, org.gnome.Console (kgx) и т.п.
+		return true // gnome-terminal, xfce4-terminal, org.gnome.Console (kgx), etc.
 	}
 	switch s {
 	case "kitty", "foot", "footclient", "alacritty", "st", "st-256color",
@@ -265,34 +265,34 @@ func isTermClass(s string) bool {
 	return false
 }
 
-// --- Вставка выбранной записи, независимая от раскладки ---
+// --- Layout-independent pasting of the selected entry ---
 //
-// Задача: синтезировать Ctrl+V (Ctrl+Shift+V для терминалов) так, чтобы вставили
-// ЛЮБЫЕ приложения (GTK/Qt/Electron/терминалы) при ЛЮБОЙ активной раскладке
-// (у пользователя us,ru,us). Наивный XTEST реального keycode 'v' в русской группе
-// даёт «м» — на этой физической клавише кириллица.
+// Goal: synthesize Ctrl+V (Ctrl+Shift+V for terminals) so that ANY application
+// (GTK/Qt/Electron/terminals) pastes under ANY active layout
+// (the user has us,ru,us). A naive XTEST of the real 'v' keycode in the Russian group
+// produces "м" — that physical key carries Cyrillic there.
 //
-// Решение (как в xdotool, но нативно и потому быстро, ~единицы мс): держим
-// ЗАПАСНОЙ неиспользуемый keycode, замапленный на 'v'/'V' во ВСЕХ группах, и шлём
-// именно его — тогда в любой группе на нём выходит 'v'. Реальную клавишу 'v' слать
-// нельзя: терминалы (kitty) ведут активную группу сами и в русской видят «м».
+// Solution (like xdotool, but native and therefore fast, ~a few ms): keep a
+// SPARE unused keycode mapped to 'v'/'V' in ALL groups, and send exactly
+// that one — then in any group it yields 'v'. The real 'v' key can't be
+// sent: terminals (kitty) track the active group themselves and in Russian see "м".
 //
-// Три тонкости, без которых ломается:
-//  1. Запасной keycode мапим ТОЛЬКО пока попап открыт (setupSpareKey в showPopup),
-//     а после закрытия возвращаем в NoSymbol (restoreSpareKey, см. finish). Если
-//     держать 'v' на нём постоянно, mutter резолвит горячую клавишу Super+V именно
-//     на этот keycode (в русской раскладке 'v' больше нигде нет) → физический
-//     Super+V перестаёт открывать попап. Пока попап открыт, клавиатура и так
-//     захвачена, так что Super+V в это время не нужен.
-//  2. Мапим при ОТКРЫТИИ попапа (не в момент нажатия Enter), чтобы приложения
-//     успели асинхронно перечитать keymap до нажатия — иначе гонка: приложение
-//     обработает нажатие со старым keymap и не увидит 'v'.
-//  3. Возврат мэппинга — с задержкой после закрытия (см. finish), т.к. Qt/Electron
-//     читают событие клавиши асинхронно: вернёшь сразу — увидят уже NoSymbol.
+// Three subtleties, without which it breaks:
+//  1. We map the spare keycode ONLY while the popup is open (setupSpareKey in showPopup),
+//     and return it to NoSymbol after closing (restoreSpareKey, see finish). If
+//     'v' is kept on it permanently, mutter resolves the Super+V hotkey to exactly
+//     this keycode (in the Russian layout 'v' exists nowhere else) → the physical
+//     Super+V stops opening the popup. While the popup is open the keyboard is
+//     grabbed anyway, so Super+V isn't needed during that time.
+//  2. We map on popup OPEN (not at the moment Enter is pressed) so applications
+//     have time to asynchronously re-read the keymap before the keypress — otherwise a race:
+//     the app processes the keypress with the old keymap and doesn't see 'v'.
+//  3. Restoring the mapping is delayed after closing (see finish), because Qt/Electron
+//     read the key event asynchronously: restore it immediately and they'd already see NoSymbol.
 
-// setupSpareKey мапит запасной keycode на 'v'/'V' во всех группах раскладки
-// (см. блок выше). keysymsPerKeycode берём серверный (spareKPK), иначе смещение
-// групп ломается и в русской раскладке выходит «м».
+// setupSpareKey maps the spare keycode to 'v'/'V' in all layout groups
+// (see the block above). We take the server's keysymsPerKeycode (spareKPK), otherwise the
+// group offset breaks and the Russian layout yields "м".
 func setupSpareKey() {
 	if spareKey == 0 {
 		return
@@ -303,14 +303,14 @@ func setupSpareKey() {
 	}
 	ks := make([]xproto.Keysym, n)
 	for i := 0; i+1 < n; i += 2 {
-		ks[i], ks[i+1] = 0x0076, 0x0056 // каждая группа: [v, V]
+		ks[i], ks[i+1] = 0x0076, 0x0056 // each group: [v, V]
 	}
 	xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, byte(n), ks)
 	xsync()
 }
 
-// restoreSpareKey возвращает запасной keycode в NoSymbol — иначе mutter резолвит
-// на него Super+V и хоткей перестаёт работать (см. тонкость 1 выше).
+// restoreSpareKey returns the spare keycode to NoSymbol — otherwise mutter resolves
+// Super+V to it and the hotkey stops working (see subtlety 1 above).
 func restoreSpareKey() {
 	if spareKey == 0 {
 		return
@@ -319,17 +319,17 @@ func restoreSpareKey() {
 	if n < 1 {
 		n = 1
 	}
-	ks := make([]xproto.Keysym, n) // все NoSymbol
+	ks := make([]xproto.Keysym, n) // all NoSymbol
 	xproto.ChangeKeyboardMapping(X.Conn(), 1, spareKey, byte(n), ks)
 	xsync()
 }
 
-// pasteInto синтезирует Ctrl+V (Ctrl+Shift+V для терминалов) через XTEST,
-// используя запасной keycode (замаплен на 'v' во всех группах в setupSpareKey).
+// pasteInto synthesizes Ctrl+V (Ctrl+Shift+V for terminals) via XTEST,
+// using the spare keycode (mapped to 'v' in all groups by setupSpareKey).
 func pasteInto(term bool) {
 	v := vKey
 	if spareKey != 0 {
-		v = spareKey // 'v' в любой группе → раскладко-независимо
+		v = spareKey // 'v' in any group → layout-independent
 	}
 	fakeKey(true, ctrlKey)
 	if term {
@@ -344,10 +344,10 @@ func pasteInto(term bool) {
 	xsync()
 }
 
-// findSpareKeycode ищет неиспользуемый keycode (во всех группах NoSymbol), который
-// можно временно занять под 'v' для вставки. Заодно запоминает серверный
-// keysyms-per-keycode в spareKPK. Возвращает 0, если свободного нет (тогда
-// вставка откатится на реальный keycode 'v' — с оговоркой про русскую раскладку).
+// findSpareKeycode looks for an unused keycode (NoSymbol in all groups) that
+// can be temporarily repurposed for 'v' when pasting. It also records the server's
+// keysyms-per-keycode in spareKPK. Returns 0 if none is free (then
+// pasting falls back to the real 'v' keycode — with the Russian-layout caveat).
 func findSpareKeycode() xproto.Keycode {
 	setup := xproto.Setup(X.Conn())
 	minKc, maxKc := int(setup.MinKeycode), int(setup.MaxKeycode)
@@ -373,13 +373,13 @@ func findSpareKeycode() xproto.Keycode {
 	return 0
 }
 
-// xsync — round-trip, чтобы сервер применил запрос до следующего шага.
+// xsync — a round-trip so the server applies the request before the next step.
 func xsync() {
 	xproto.GetInputFocus(X.Conn()).Reply()
 }
 
-// fakeKey синтезирует нажатие/отпускание клавиши через XTEST (реальный ввод,
-// а не SendEvent — приложения его принимают).
+// fakeKey synthesizes a key press/release via XTEST (real input,
+// not SendEvent — applications accept it).
 func fakeKey(press bool, code xproto.Keycode) {
 	t := byte(xproto.KeyRelease)
 	if press {
@@ -388,7 +388,7 @@ func fakeKey(press bool, code xproto.Keycode) {
 	xtest.FakeInput(X.Conn(), t, byte(code), 0, X.RootWin(), 0, 0, 0)
 }
 
-// ---------- позиционирование ----------
+// ---------- positioning ----------
 
 func popupXY() (int, int) {
 	mouseX, mouseY := 0, 0

@@ -1,7 +1,7 @@
 //go:build linux
 
-// daemon.go — резидентная часть: единственный инстанс на сокете, инициализация
-// бэкенда (X11/Wayland), слушалка буфера и история (только в памяти).
+// daemon.go — resident part: single instance on a socket, backend initialization
+// (X11/Wayland), clipboard watcher and history (in-memory only).
 package main
 
 import (
@@ -22,16 +22,16 @@ import (
 	"github.com/tihonove/gnome-clipboard-history-native/internal/uinput"
 )
 
-const maxHistory = 25 // сколько записей держим в памяти
+const maxHistory = 25 // how many entries we keep in memory
 
 var (
-	clipboard *gtk.Clipboard // CLIPBOARD: и слушаем, и владеем им при вставке
-	primary   *gtk.Clipboard // PRIMARY: нужен для вставки Shift+Insert в VTE-терминалы (Wayland)
-	history   []*clipItem    // история буфера, свежие сверху (только в памяти)
+	clipboard *gtk.Clipboard // CLIPBOARD: we both watch it and own it when pasting
+	primary   *gtk.Clipboard // PRIMARY: needed for Shift+Insert paste into VTE terminals (Wayland)
+	history   []*clipItem    // clipboard history, newest on top (in-memory only)
 
-	// Когда мы сами кладём запись в буфер при вставке — не хотим двигать её наверх
-	// истории (выбранный элемент должен остаться на месте). Помечаем такой self-set
-	// ключом записи (общий для текста и картинки), чтобы owner-change/XFIXES его пропустил.
+	// When we ourselves put an entry into the clipboard on paste, we don't want to move it
+	// to the top of the history (the selected item must stay in place). We mark such a self-set
+	// with the entry's key (shared for text and image) so that owner-change/XFIXES skips it.
 	selfSetKey     string
 	selfSetPending bool
 )
@@ -39,24 +39,24 @@ var (
 func runDaemon() {
 	if c, err := net.Dial("unix", sockPath()); err == nil {
 		c.Close()
-		log.Fatal("демон уже запущен")
+		log.Fatal("daemon is already running")
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	if isWayland() {
-		// Wayland: xgb-грабы/XTEST не работают — вставка через собственное
-		// uinput-устройство (см. internal/uinput). История — через XWayland-мост
-		// (startClipboardWatchWayland в wayland.go).
+		// Wayland: xgb grabs/XTEST don't work — paste is done via our own
+		// uinput device (see internal/uinput). History — via the XWayland bridge
+		// (startClipboardWatchWayland in wayland.go).
 		if err := uinput.Init(); err != nil {
-			log.Printf("uinput недоступен (%v). Вставка на Wayland отключена — "+
-				"выполните один раз: gnome-clipboard-history-native --setup-input", err)
+			log.Printf("uinput unavailable (%v). Paste on Wayland disabled — "+
+				"run once: gnome-clipboard-history-native --setup-input", err)
 		}
 	} else {
 		var err error
 		X, err = xgbutil.NewConn()
 		if err != nil {
-			log.Fatalf("нет соединения с X: %v", err)
+			log.Fatalf("no connection to X: %v", err)
 		}
 		keybind.Initialize(X)
 		if err := xtest.Init(X.Conn()); err != nil {
@@ -79,9 +79,9 @@ func runDaemon() {
 	startClipboardWatch()
 	startSocketListener()
 
-	log.Printf("daemon (GTK, %s): слушаю сокет %s — жду --show", sessionKind(), sockPath())
+	log.Printf("daemon (GTK, %s): listening on socket %s — waiting for --show", sessionKind(), sockPath())
 	gtk.Main()
-	uinput.Close() // no-op на X11
+	uinput.Close() // no-op on X11
 }
 
 func startSocketListener() {
@@ -116,7 +116,7 @@ func startSocketListener() {
 	}()
 }
 
-// ---------- слушалка буфера ----------
+// ---------- clipboard watcher ----------
 
 func startClipboardWatch() {
 	var err error
@@ -124,19 +124,19 @@ func startClipboardWatch() {
 	if err != nil {
 		log.Fatalf("clipboard: %v", err)
 	}
-	// GTK owner-change + WaitForContents("image/png") возвращает пустые данные для
-	// бинарных форматов (GetData len=0). Используем XFIXES+xgb напрямую — тот же
-	// механизм, что и для Wayland-бэкенда: читаем image/png через ConvertSelection
-	// без GTK-посредника. Работает и на X11, и на Wayland (оба подключены через $DISPLAY).
+	// GTK owner-change + WaitForContents("image/png") returns empty data for
+	// binary formats (GetData len=0). We use XFIXES+xgb directly — the same
+	// mechanism as for the Wayland backend: we read image/png via ConvertSelection
+	// without a GTK intermediary. Works on both X11 and Wayland (both connected via $DISPLAY).
 	startClipboardWatchWayland()
 }
 
-// ingestText кладёт новый текст буфера в историю, пропуская наши собственные вставки
-// (self-set) — чтобы выбранная запись не прыгала наверх. Вызывать только из GTK-потока.
+// ingestText puts new clipboard text into the history, skipping our own pastes
+// (self-set) so the selected entry doesn't jump to the top. Call only from the GTK thread.
 func ingestText(txt string) {
 	key := textKey(txt)
 	if selfSetPending && key == selfSetKey {
-		selfSetPending = false // это наша же вставка — порядок не трогаем
+		selfSetPending = false // this is our own paste — don't touch the order
 		return
 	}
 	if strings.TrimSpace(txt) == "" {
@@ -145,9 +145,9 @@ func ingestText(txt string) {
 	addItem(&clipItem{kind: kindText, text: txt, key: key})
 }
 
-// ingestImage кладёт новую картинку в историю, пропуская наши self-set. png —
-// канонические байты (уже скопированные), pix — их декодированный pixbuf.
-// Вызывать только из главного GTK-потока.
+// ingestImage puts a new image into the history, skipping our self-sets. png is
+// the canonical bytes (already copied), pix is their decoded pixbuf.
+// Call only from the main GTK thread.
 func ingestImage(png []byte, pix *gdk.Pixbuf) {
 	if len(png) == 0 || pix == nil {
 		return
@@ -160,10 +160,10 @@ func ingestImage(png []byte, pix *gdk.Pixbuf) {
 	addItem(&clipItem{kind: kindImage, png: png, pix: pix, key: key})
 }
 
-// setClipboard делает демона владельцем CLIPBOARD с текстом s. Пока демон жив, он
-// сам обслуживает запросы вставки — поэтому внешний xsel/xclip не нужен.
-// Вызывается только при вставке выбранной записи, поэтому помечаем self-set: пришедший
-// следом owner-change с этим текстом не должен двигать запись наверх истории.
+// setClipboard makes the daemon the owner of CLIPBOARD with text s. While the daemon is
+// alive, it serves paste requests itself — so no external xsel/xclip is needed.
+// Called only when pasting the selected entry, so we mark a self-set: the owner-change that
+// follows with this text must not move the entry to the top of the history.
 func setClipboard(s string) {
 	if clipboard != nil {
 		selfSetKey = textKey(s)
@@ -172,9 +172,9 @@ func setClipboard(s string) {
 	}
 }
 
-// setClipboardImage делает демона владельцем CLIPBOARD с картинкой pix (GTK сам отдаёт
-// image/png по запросу вставляющего приложения). png нужен только для self-set-метки:
-// пришедший следом owner-change с той же картинкой не должен двигать запись наверх.
+// setClipboardImage makes the daemon the owner of CLIPBOARD with image pix (GTK itself serves
+// image/png on request from the pasting application). png is only needed for the self-set mark:
+// the owner-change that follows with the same image must not move the entry to the top.
 func setClipboardImage(png []byte, pix *gdk.Pixbuf) {
 	if clipboard != nil && pix != nil {
 		selfSetKey = imageKey(png)
@@ -183,10 +183,10 @@ func setClipboardImage(png []byte, pix *gdk.Pixbuf) {
 	}
 }
 
-// setPrimary делает демона владельцем PRIMARY с текстом s. Нужно на Wayland: VTE-
-// терминалы по Shift+Insert вставляют именно PRIMARY (а не CLIPBOARD), поэтому без
-// этого в консоль вставлялось бы старое содержимое выделения, а не выбранная запись.
-// PRIMARY мы не мониторим (историю снимаем с CLIPBOARD), так что self-set-метка не нужна.
+// setPrimary makes the daemon the owner of PRIMARY with text s. Needed on Wayland: VTE
+// terminals on Shift+Insert paste exactly PRIMARY (not CLIPBOARD), so without this
+// the console would paste the old selection contents rather than the selected entry.
+// We don't monitor PRIMARY (we take history from CLIPBOARD), so no self-set mark is needed.
 func setPrimary(s string) {
 	if primary == nil {
 		if p, err := gtk.ClipboardGet(gdk.SELECTION_PRIMARY); err == nil {
@@ -199,8 +199,8 @@ func setPrimary(s string) {
 }
 
 func sockPath() string {
-	// GCHN_SOCK — отдельный сокет для дев-инстанса, чтобы не толкаться с
-	// установленным демоном (общий сокет — единственный конфликт single-instance).
+	// GCHN_SOCK — a separate socket for a dev instance, so it doesn't collide with
+	// the installed daemon (a shared socket is the only single-instance conflict).
 	if s := os.Getenv("GCHN_SOCK"); s != "" {
 		return s
 	}

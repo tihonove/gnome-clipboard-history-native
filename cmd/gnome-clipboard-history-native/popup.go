@@ -1,7 +1,7 @@
 //go:build linux
 
-// popup.go — общая для обоих бэкендов часть попапа: CSS (тема Yaru), конструктор
-// содержимого buildPopupBox и подготовка текста записей к показу.
+// popup.go — the part of the popup shared by both backends: CSS (Yaru theme), the
+// buildPopupBox content constructor, and preparing entry text for display.
 package main
 
 import (
@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	listW    = 340 // ширина списка (без учёта рамки/тени)
-	popupW   = 372 // оценка полного размера окна (для позиционирования)
+	listW    = 340 // list width (excluding the frame/shadow)
+	popupW   = 372 // estimate of the full window size (for positioning)
 	popupH   = 360
-	pageStep = 3  // на сколько прыгать по PageUp/PageDown (≈ число видимых строк)
-	rowH     = 56 // фикс. высота контента строки (≈ 3 текстовые строки); картинку рисуем cover в этот размер
+	pageStep = 3  // how far to jump on PageUp/PageDown (≈ number of visible rows)
+	rowH     = 56 // fixed row content height (≈ 3 text lines); images are cover-rendered to this size
 )
 
 const cssData = `
@@ -40,7 +40,7 @@ window { background-color: transparent; }
 list { background-color: transparent; }
 list row {
   background-color: transparent;
-  /* тонкая серая рамка вокруг каждого элемента — чтобы записи не сливались */
+  /* a thin gray border around each item — so entries don't blend together */
   border: 1px solid alpha(@theme_fg_color, 0.14);
   border-radius: 8px;
   margin: 2px 8px;
@@ -48,7 +48,7 @@ list row {
   outline: none;
 }
 list row:selected {
-  /* выделенный — акцентом Yaru поверх серой рамки */
+  /* selected — Yaru accent on top of the gray border */
   border-color: @theme_selected_bg_color;
   background-color: alpha(@theme_selected_bg_color, 0.16);
 }
@@ -79,9 +79,9 @@ func applyCSS() {
 	}
 }
 
-// buildPopupBox собирает содержимое попапа (заголовок + список записей или
-// плейсхолдер пустоты) и выставляет глобалы listBox/scrolled. Общий для обоих
-// бэкендов — X11 (showPopup) и Wayland (showPopupWayland).
+// buildPopupBox assembles the popup content (header + list of entries or an
+// empty-state placeholder) and sets the listBox/scrolled globals. Shared by both
+// backends — X11 (showPopup) and Wayland (showPopupWayland).
 func buildPopupBox() *gtk.Box {
 	outer, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
 	addClass(outer, "clip-frame")
@@ -96,7 +96,7 @@ func buildPopupBox() *gtk.Box {
 		ph.SetJustify(gtk.JUSTIFY_CENTER)
 		ph.SetHAlign(gtk.ALIGN_CENTER)
 		ph.SetVAlign(gtk.ALIGN_CENTER)
-		ph.SetSizeRequest(listW, 285) // та же высота, что и у списка
+		ph.SetSizeRequest(listW, 285) // the same height as the list
 		addClass(ph, "clip-empty")
 		outer.PackStart(ph, true, true, 0)
 		return outer
@@ -110,7 +110,7 @@ func buildPopupBox() *gtk.Box {
 
 	scrolled, _ = gtk.ScrolledWindowNew(nil, nil)
 	scrolled.SetPolicy(gtk.POLICY_NEVER, gtk.POLICY_AUTOMATIC)
-	scrolled.SetSizeRequest(listW, 285) // видимая часть — ~3.5 записи
+	scrolled.SetSizeRequest(listW, 285) // visible part — ~3.5 entries
 	scrolled.Add(listBox)
 	outer.PackStart(scrolled, true, true, 0)
 	return outer
@@ -124,30 +124,30 @@ func addClass(w interface {
 	}
 }
 
-// rowWidget строит виджет содержимого одной строки списка: для текста — Label
-// (обрезка до 3 строк, см. displayText), для картинки — DrawingArea с cover-рендером.
-// Высота фиксирована (rowH) для обоих видов, чтобы строки были одинаковыми.
+// rowWidget builds the content widget for one list row: for text — a Label
+// (truncated to 3 lines, see displayText), for an image — a DrawingArea with a cover-render.
+// The height is fixed (rowH) for both kinds, so rows are uniform.
 func rowWidget(it *clipItem) gtk.IWidget {
 	if it.kind == kindImage {
 		return imageRow(it.pix)
 	}
 	lbl, _ := gtk.LabelNew(displayText(it.text))
 	lbl.SetXAlign(0)
-	lbl.SetYAlign(0) // текст сверху (короткие оставляют пустоту снизу)
+	lbl.SetYAlign(0) // text at the top (short ones leave empty space at the bottom)
 	lbl.SetVAlign(gtk.ALIGN_FILL)
-	lbl.SetLineWrap(false)                // без переноса → каждая строка = одна визуальная
-	lbl.SetEllipsize(pango.ELLIPSIZE_END) // длинную строку обрезаем многоточием справа
+	lbl.SetLineWrap(false)                // no wrapping → each line = one visual line
+	lbl.SetEllipsize(pango.ELLIPSIZE_END) // a long line is truncated with an ellipsis on the right
 	lbl.SetMaxWidthChars(42)
-	lbl.SetSizeRequest(-1, rowH) // та же высота, что у картинок
+	lbl.SetSizeRequest(-1, rowH) // the same height as images
 	return lbl
 }
 
-// imageRow рисует превью картинки в фиксированный прямоугольник строки методом cover:
-// масштаб «на заполнение» (max из коэффициентов ширины/высоты), центрирование, обрезка
-// краёв по границе строки (Clip). Это overflow:hidden — картинка заливает всю строку.
+// imageRow draws an image preview into the fixed row rectangle using the cover method:
+// scale "to fill" (max of the width/height ratios), centering, and clipping the edges
+// to the row boundary (Clip). This is overflow:hidden — the image fills the whole row.
 func imageRow(pix *gdk.Pixbuf) gtk.IWidget {
 	da, _ := gtk.DrawingAreaNew()
-	da.SetSizeRequest(-1, rowH) // ширину растянет строка, высота фиксирована
+	da.SetSizeRequest(-1, rowH) // width is stretched by the row, height is fixed
 	da.SetHExpand(true)
 	da.Connect("draw", func(_ *gtk.DrawingArea, cr *cairo.Context) bool {
 		if pix == nil {
@@ -162,9 +162,9 @@ func imageRow(pix *gdk.Pixbuf) gtk.IWidget {
 		}
 		cr.Save()
 		cr.Rectangle(0, 0, w, h)
-		cr.Clip() // всё вне строки обрезаем
+		cr.Clip() // clip everything outside the row
 		scale := math.Max(w/pw, h/ph)
-		cr.Translate((w-pw*scale)/2, (h-ph*scale)/2) // центрируем обрезаемую картинку
+		cr.Translate((w-pw*scale)/2, (h-ph*scale)/2) // center the clipped image
 		cr.Scale(scale, scale)
 		gtk.GdkCairoSetSourcePixBuf(cr, pix, 0, 0)
 		cr.Paint()
@@ -174,9 +174,9 @@ func imageRow(pix *gdk.Pixbuf) gtk.IWidget {
 	return da
 }
 
-// displayText приводит текст записи РОВНО к 3 строкам: длинные обрезает (с «…»),
-// короткие дополняет пустыми строками. Тогда высота каждого элемента одинаковая
-// и равна ровно 3 строкам (полный текст храним в history и вставляем целиком).
+// displayText forces entry text to EXACTLY 3 lines: long ones are truncated (with "…"),
+// short ones are padded with empty lines. Then every item's height is uniform and
+// equals exactly 3 lines (the full text is stored in history and pasted in full).
 func displayText(s string) string {
 	lines := strings.Split(s, "\n")
 	if len(lines) > 3 {

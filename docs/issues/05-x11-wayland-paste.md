@@ -1,476 +1,486 @@
-# X11 / Wayland / вставка / фокус — уроки из issues CopyQ
+# X11 / Wayland / paste / focus — lessons from CopyQ issues
 
-Разбор ишью `hluk/CopyQ` по темам, которые для gnome-clipboard-history-native — ядро, а не периферия:
-синтетическая вставка, кража фокуса, механика X11 selection, раскладка при вставке
-и (на будущее) Wayland. Цель прежняя — не копировать «комбайн» CopyQ, а снять с
-него уже оплаченные баги и сверить их с нашей архитектурой.
+An analysis of `hluk/CopyQ` issues on the topics that are core to gnome-clipboard-history-native
+rather than peripheral: synthetic paste, focus stealing, X11 selection mechanics,
+keyboard layout during paste, and (for the future) Wayland. The goal is the same as
+before — not to clone the CopyQ "kitchen sink", but to take the bugs it already paid
+for and check them against our architecture.
 
-Напоминание про gnome-clipboard-history-native для контекста: GNOME **только X11** (Wayland вне scope),
-Go + GTK3 (Yaru) + чистый X11 через `jezek/xgb`. Хоткей — не `XGrabKey(Super)` (под
-mutter нельзя), а gsettings custom keybinding, запускающий `gnome-clipboard-history-native --show`. Попап —
-`GTK_WINDOW_POPUP` (override-redirect), фокус клавиатуры добираем через
-`xproto.GrabKeyboard` на root + поллинг, `SetInputFocus` не делаем (целевое окно
-сохраняет фокус). Вставка — нативный XTEST FakeInput Ctrl+V (для терминалов
-Ctrl+Shift+V по WM_CLASS), раскладко-независимо через временный запасной keycode,
-ремапнутый в 'v' во всех XKB-группах. Демон владеет CLIPBOARD через GTK пока жив.
+A reminder about gnome-clipboard-history-native for context: GNOME **X11 only** (Wayland out of
+scope), Go + GTK3 (Yaru) + pure X11 via `jezek/xgb`. The hotkey is not
+`XGrabKey(Super)` (impossible under mutter) but a gsettings custom keybinding that
+launches `gnome-clipboard-history-native --show`. The popup is a `GTK_WINDOW_POPUP`
+(override-redirect); we obtain keyboard focus via `xproto.GrabKeyboard` on root +
+polling, we do not call `SetInputFocus` (the target window keeps focus). Paste is a
+native XTEST FakeInput Ctrl+V (Ctrl+Shift+V for terminals, by WM_CLASS),
+layout-independent via a temporary spare keycode remapped to 'v' in all XKB groups.
+The daemon owns CLIPBOARD through GTK while it is alive.
 
-Обозначения: `#NNNN`, версии и имена настроек — как в оригинале.
-
----
-
-## Вставка и фокус (X11)
-
-### CopyQ вставляет через синтетические keypress — и это хрупко
-
-CopyQ не «пишет в окно», а симулирует нажатие клавиш вставки через **libXtst**
-(`XTestFakeKeyEvent`), ровно как мы. Отсюда весь класс их проблем — и подтверждение,
-что наш путь (XTEST FakeInput) — тот же самый, со всеми теми же граблями.
-
-- **#3196** (ghostty/kitty, X11, закрыто) — «paste on activate» перестал работать в
-  терминалах начиная с v11. Пользователь через `kitty --debug-input` доказал, что
-  **CopyQ не отправлял модификатор Shift**: kitty видел голый `Insert` вместо
-  Shift+Insert. hluk сразу спросил про `ldd | rg libX` — есть ли `libXtst.so.6`.
-  Урок: инъекция модификатора + клавиши через XTEST негарантированно атомарна;
-  бывает, что клавиша «проходит», а модификатор — нет.
-
-- **#1729** (GNOME/X11, открыто) — **вставка срабатывает по многу раз** (3–30
-  дубликатов) и подвешивает целевое окно на секунду. hluk: «приложение полностью
-  залипает, пока симулирует Shift+Insert — возможно, из-за анимации сворачивания
-  окна в WM». Ключевые советы из треда — прямо про тайминги:
-  - `window_wait_after_raised_ms` (пробовали 150 мс) — **пауза после
-    поднятия/скрытия окна перед вставкой**;
-  - `window_key_press_time_ms` (**дефолт 50 мс на Linux**) — задержка между press и
-    release синтетической клавиши; `0` ломает вставку в Chrome;
-  - в качестве фикса CopyQ **убрал `XSync()` в середине** симуляции press→release
-    (#2116).
-
-  Механизм дубликатов, судя по всему: пока идёт анимация hide/minimize окна попапа,
-  фокус «дрожит», события пересылаются повторно/не туда.
-
-**Как это ложится на gnome-clipboard-history-native — и что мы уже сделали правильно:**
-
-1. **Мы не сворачиваем окно с анимацией.** Наш попап — override-redirect
-   `GTK_WINDOW_POPUP`, WM его не менеджит и не анимирует. Значит, главный источник
-   #1729 (WM-анимация hide подвешивает XTEST) у нас структурно отсутствует. Это
-   сильный аргумент в пользу override-redirect.
-
-2. **Порядок «отпустить grab → отдать фокус цели → вставить» критичен по времени.**
-   Раз мы держим `GrabKeyboard` на root, перед FakeInput его надо снять (`Ungrab`),
-   иначе синтетические события уйдут не туда. И между ungrab/hide попапа и
-   FakeInput нужна **небольшая пауза** — это и есть аналог
-   `window_wait_after_raised_ms`. Если увидим дубли/пропажу модификатора — первый
-   подозреваемый именно этот зазор.
-
-3. **Задержку press→release стоит закладывать сразу.** Дефолт CopyQ 50 мс на Linux
-   и явная поломка Chrome при 0 мс — не суеверие: некоторым тулкитам (Chromium)
-   нужно ненулевое время удержания клавиши, иначе keypress не регистрируется.
-   Рекомендация: между FakeInput(press) и FakeInput(release) для каждой клавиши
-   держать ~30–50 мс, конфигурируемо. **Не** делать press и release в одном
-   XSync-пакете вплотную.
-
-4. **Верификация активного окна перед вставкой.** CopyQ и в скриптах (#2557),
-   и в общем API опирается на `currentWindowTitle()`/`currentWindowClass()`.
-   Нам это нужно дважды: (а) выбрать Ctrl+V vs Ctrl+Shift+V по WM_CLASS — уже
-   делаем; (б) как sanity-check, что после ungrab фокус реально вернулся на то окно,
-   что было активно **до** показа попапа (запоминать `_NET_ACTIVE_WINDOW` при
-   `--show`, сверять перед FakeInput). Иначе — вставка в чужое окно.
-
-### Терминалы требуют Shift, и это невозможно решить «одним шорткатом»
-
-- **#2557** (Hyprland, закрыто) и **#3196** — по умолчанию CopyQ шлёт **Shift+Insert**
-  (hluk: «это дефолтный paste и для CLIPBOARD, и для PRIMARY в большинстве
-  терминалов»). Но в части терминалов (Alacritty с дефолтным конфигом, kitty)
-  Shift+Insert не забинден на paste, а Ctrl+Shift+V — да; и наоборот, Ctrl+Shift+V
-  ломает вставку в большинстве **не**-терминалов. Итог hluk: **детектировать окно
-  по заголовку/классу и выбирать шорткат** (`if window == 'Alacritty' → Ctrl+Shift+V
-  else Shift+Insert`).
-
-**Для gnome-clipboard-history-native:** это ровно наша стратегия (Ctrl+V для обычных окон, Ctrl+Shift+V для
-терминалов по WM_CLASS), и история CopyQ её валидирует: **универсального шортката
-вставки не существует**, детект окна обязателен. Отличие: CopyQ выбрал Shift+Insert
-базой, мы — Ctrl+V. Наш выбор лучше для GTK/Qt/браузеров; для терминалов
-Ctrl+Shift+V — стандарт GNOME Terminal/VTE, что нам и надо. Стоит держать **список
-WM_CLASS терминалов расширяемым** (ghostty, kitty, alacritty, wezterm, foot(xwl),
-Terminator, xterm — у xterm вообще только Shift+Insert!). Для xterm/urxvt может
-понадобиться отдельная ветка Shift+Insert — заложить в мапу «класс → комбинация»,
-а не булев флаг «терминал да/нет».
-
-### Кража фокуса: CopyQ может только «попросить» активацию — мы её обходим
-
-Это, пожалуй, главный архитектурный вывод из всей выборки.
-
-- **#2960** (i3, закрыто) — меню, открытое по кейбиндингу WM, **не получает фокус**;
-  открытое через `copyq menu` из скрипта — получает. hluk: «это focus prevention
-  или баг WM, в самом приложении не чиню».
-- **#2993** (Mint, закрыто) — `copyq show` **не всегда стартует сфокусированным**
-  (зависит от того, как закрыли прошлый раз). hluk прямым текстом: **«у меня почти
-  нет контроля над фокусом окна — приложение может только *запросить* активацию»**.
-- **#3325** (KDE, закрыто) — трей-меню не активируется шорткатом, если окно CopyQ не
-  в фокусе; в логе `Failed to create grabbing popup … parent window has received
-  input`.
-
-**Для gnome-clipboard-history-native:** наш дизайн бьёт прямо в этот класс багов. Мы **не полагаемся на
-activation/`SetInputFocus`** вообще — вместо этого `GrabKeyboard` на root
-перехватывает клавиатуру целиком, а целевое окно фокус не теряет. Это ровно то,
-чего CopyQ добиться не может из Qt. Пока grab успешен, focus-stealing-prevention
-GNOME нам не мешает — мы не просим фокус, мы его временно **захватываем на уровне
-X**. Риски, которые надо держать в голове:
-- `GrabKeyboard` может вернуть `AlreadyGrabbed`/`Frozen` (другой клиент держит grab —
-  например открытое системное меню). Обрабатывать код возврата, при неудаче —
-  ретрай с коротким бэкоффом или тихо выйти, **не** показывать «мёртвый» попап без
-  клавиатуры (это баг #2960/#3325 в другой обёртке).
-- Grab надо снимать (`UngrabKeyboard`) **до** XTEST-вставки и **при любом** пути
-  закрытия попапа (Esc, потеря видимости, выбор). Иначе клавиатура «залипнет» у
-  root — целевое окно онемеет (аналог подвисания из #1729).
-
-### Глобальный хоткей: почему мы правильно ушли в gsettings
-
-- **#1267** (открыто) — `Meta+V`/Super как глобальный шорткат **требует двойного
-  нажатия** или не работает; в GNOME конфликтует со встроенным Super+V. **Рабочее
-  решение из треда — ровно наше**: завести кастомный кейбиндинг в настройках GNOME,
-  запускающий `copyq -e "menu()"`/`toggle()`. Несколько пользователей независимо
-  пришли к тому же.
-- **#3616** (закрыто) — при autostart глобальный шорткат **не регистрируется без
-  задержки ~5 c** (D-Bus портал ещё не поднялся); фикс — коннектиться к D-Bus
-  позже.
-- **#3488** (KDE/Wayland, открыто) — внутренние глобальные шорткаты не срабатывают.
-
-**Для gnome-clipboard-history-native:** подтверждение, что `XGrabKey(Super)` под mutter — тупик (CopyQ
-собрал те же грабли и через Qt, и через D-Bus-портал), а **делегирование хоткея
-самому GNOME через gsettings — единственный надёжный путь**. Бонус: мы не зависим
-от гонки старта D-Bus-портала (#3616) — GNOME сам запускает `gnome-clipboard-history-native --show`.
+Notation: `#NNNN`, versions, and setting names are as in the originals.
 
 ---
 
-## Раскладка / XKB и синтетическая вставка
+## Paste and focus (X11)
 
-Наш самый выстраданный баг (реальный keycode 'v' в ru-раскладке даёт кириллицу)
-у CopyQ проявляется под другими углами — но корень тот же: **keycode ≠ keysym, а
-синтетика оперирует keycode'ами**.
+### CopyQ pastes via synthetic keypresses — and it's fragile
 
-- **#3378** (открыто) — шорткаты с цифрами **numpad мисмапятся**: назначаешь
-  `Ctrl+Keypad1`, а в UI показывается `Ctrl+1`, и работает только верхний ряд.
-  Причина (в треде): хардварные keycode'ы numpad и верхнего ряда разные, а слой
-  Qt их схлопывает в один keysym. То есть Qt/CopyQ путаются именно на уровне
-  keycode↔keysym mapping — тот же слой, где живёт наш баг с 'v'.
-- **#3405** (открыто) — китайские символы **иногда вставляются как literal-unicode**
-  (не как текст), лечится повторным выбором из истории. Это уже не XTEST, а
-  негоциация форматов selection (см. ниже), но симптом «вставилось не то» тот же.
-- **#3253** (открыто) — упавшая команда `Keyboard layout change (xneur like)` —
-  показывает, что пользователи CopyQ активно живут в мультираскладочном окружении;
-  прямого XTEST-фикса раскладки в CopyQ нет.
+CopyQ doesn't "write into the window" — it simulates the paste keystrokes through
+**libXtst** (`XTestFakeKeyEvent`), exactly like we do. Hence the whole class of their
+problems — and confirmation that our path (XTEST FakeInput) is the very same one, with
+all the same pitfalls.
 
-**Вывод по нашему подходу.** Прямого дубликата нашего бага «синтетический 'v' →
-кириллица» в issue-трекере CopyQ **нет** — и это, скорее, потому что CopyQ шлёт
-**Shift+Insert**, а `Insert` — клавиша без буквенного keysym, инвариантная к
-раскладке. Это, по сути, **альтернативное решение той же проблемы**: выбрать для
-вставки клавишу, чей keysym не зависит от XKB-группы.
+- **#3196** (ghostty/kitty, X11, closed) — "paste on activate" stopped working in
+  terminals starting from v11. Using `kitty --debug-input`, the user proved that
+  **CopyQ wasn't sending the Shift modifier**: kitty saw a bare `Insert` instead of
+  Shift+Insert. hluk immediately asked about `ldd | rg libX` — whether `libXtst.so.6`
+  is present. Lesson: injecting a modifier + a key via XTEST is not guaranteed atomic;
+  it happens that the key "goes through" but the modifier does not.
 
-Отсюда две валидные стратегии, и обе легитимны:
+- **#1729** (GNOME/X11, open) — **paste fires many times** (3–30 duplicates) and hangs
+  the target window for a second. hluk: "the application stalls completely while it
+  simulates Shift+Insert — probably because of the window-minimize animation in the
+  WM". Key advice from the thread — straight about timing:
+  - `window_wait_after_raised_ms` (they tried 150 ms) — **a pause after
+    raising/hiding the window before paste**;
+  - `window_key_press_time_ms` (**default 50 ms on Linux**) — the delay between press
+    and release of a synthetic key; `0` breaks paste in Chrome;
+  - as a fix CopyQ **removed the `XSync()` in the middle** of the press→release
+    simulation (#2116).
 
-1. **Наш путь — временный запасной keycode, ремапнутый в 'v' во всех группах**
-   (`XChangeKeyboardMapping` на неиспользуемый keycode → FakeInput по нему →
-   вернуть). Плюс: шлём именно Ctrl+V / Ctrl+Shift+V — «родные» комбинации, которые
-   понимают все GTK/Qt/браузеры/терминалы. Минус: мутируем глобальную раскладку на
-   миллисекунды (гонка, если кто-то печатает; надо `XGrabKeyboard`/`GrabServer` на
-   время ремапа и обязательный откат в `defer`).
-2. **Путь CopyQ — вставлять раскладко-инвариантной клавишей** (Insert+модификатор),
-   не трогая mapping. Плюс: не мутируем раскладку. Минус: Shift+Insert не
-   универсален (#2557/#3196), в терминалах и части приложений не забинден на paste;
-   именно поэтому CopyQ всё равно вынужден детектить окно и переключаться на
-   Ctrl+Shift+V — где 'v' снова упирается в раскладку (для них это не проблема,
-   т.к. терминалы часто трактуют keycode, но в общем случае — та же яма).
+  The duplication mechanism, apparently: while the hide/minimize animation of the popup
+  window runs, focus "trembles", events are re-sent repeatedly / to the wrong place.
 
-**Итог для gnome-clipboard-history-native:** наш spare-keycode подход **валиден и, вероятно, более
-надёжен** для целевого набора приложений (GTK/Qt/Chromium/VTE), потому что мы
-шлём именно те комбинации, что эти приложения ждут (Ctrl+V / Ctrl+Shift+V), а не
-компромиссный Shift+Insert. Что обязательно проверить в реализации:
-- ремап делать под `GrabServer`/`GrabKeyboard`, чтобы никто не увидел «половинчатую»
-  раскладку; откат keycode — в `defer`, даже на панике;
-- запасной keycode искать динамически (пустой в текущей мапе), не хардкодить —
-  иначе конфликт на нестандартных раскладках;
-- крайний случай: если группа «сдвинута» (переключатель раскладки на Ctrl/Shift) —
-  наши синтетические Ctrl/Shift не должны случайно переключить группу; тестировать
-  на ru+en с переключателем по Shift.
+**How this maps onto gnome-clipboard-history-native — and what we already did right:**
+
+1. **We do not minimize a window with animation.** Our popup is an override-redirect
+   `GTK_WINDOW_POPUP`; the WM doesn't manage it and doesn't animate it. So the main
+   source of #1729 (WM hide animation stalls XTEST) is structurally absent for us. This
+   is a strong argument in favor of override-redirect.
+
+2. **The order "release grab → return focus to target → paste" is time-critical.**
+   Since we hold `GrabKeyboard` on root, we must release it (`Ungrab`) before FakeInput,
+   otherwise the synthetic events go to the wrong place. And between ungrab/hide of the
+   popup and FakeInput there needs to be a **small pause** — this is exactly the
+   analogue of `window_wait_after_raised_ms`. If we see duplicates / a lost modifier,
+   this gap is the prime suspect.
+
+3. **Plan for the press→release delay from the start.** CopyQ's default of 50 ms on
+   Linux and the explicit Chrome breakage at 0 ms are not superstition: some toolkits
+   (Chromium) need a nonzero key-hold time, otherwise the keypress isn't registered.
+   Recommendation: keep ~30–50 ms between FakeInput(press) and FakeInput(release) for
+   each key, configurable. Do **not** put press and release in one XSync packet
+   back-to-back.
+
+4. **Verify the active window before paste.** CopyQ relies on
+   `currentWindowTitle()`/`currentWindowClass()` both in scripts (#2557) and in the
+   general API. We need this twice: (a) to choose Ctrl+V vs Ctrl+Shift+V by WM_CLASS —
+   we already do this; (b) as a sanity check that after ungrab focus really returned to
+   the window that was active **before** the popup was shown (remember
+   `_NET_ACTIVE_WINDOW` at `--show`, verify it before FakeInput). Otherwise — paste into
+   the wrong window.
+
+### Terminals require Shift, and this cannot be solved with "one shortcut"
+
+- **#2557** (Hyprland, closed) and **#3196** — by default CopyQ sends **Shift+Insert**
+  (hluk: "this is the default paste for both CLIPBOARD and PRIMARY in most terminals").
+  But in some terminals (Alacritty with default config, kitty) Shift+Insert is not
+  bound to paste, while Ctrl+Shift+V is; and conversely, Ctrl+Shift+V breaks paste in
+  most **non**-terminals. hluk's conclusion: **detect the window by title/class and
+  pick the shortcut** (`if window == 'Alacritty' → Ctrl+Shift+V else Shift+Insert`).
+
+**For gnome-clipboard-history-native:** this is exactly our strategy (Ctrl+V for normal
+windows, Ctrl+Shift+V for terminals by WM_CLASS), and CopyQ's history validates it:
+**there is no universal paste shortcut**, window detection is mandatory. The difference:
+CopyQ chose Shift+Insert as the base, we chose Ctrl+V. Our choice is better for
+GTK/Qt/browsers; for terminals Ctrl+Shift+V is the GNOME Terminal/VTE standard, which
+is what we want. Worth keeping the **list of terminal WM_CLASSes extensible** (ghostty,
+kitty, alacritty, wezterm, foot(xwl), Terminator, xterm — xterm only takes
+Shift+Insert at all!). For xterm/urxvt a separate Shift+Insert branch may be needed —
+build it as a "class → combination" map, not a boolean "terminal yes/no" flag.
+
+### Focus stealing: CopyQ can only "ask for" activation — we bypass it
+
+This is perhaps the main architectural takeaway from the whole sample.
+
+- **#2960** (i3, closed) — a menu opened via a WM keybinding **does not get focus**;
+  opened via `copyq menu` from a script — it does. hluk: "this is focus prevention or a
+  WM bug, I don't fix it in the app itself."
+- **#2993** (Mint, closed) — `copyq show` **doesn't always start focused** (depends on
+  how it was closed last time). hluk plainly: **"I have almost no control over window
+  focus — the app can only *request* activation"**.
+- **#3325** (KDE, closed) — the tray menu doesn't activate on shortcut if the CopyQ
+  window isn't focused; the log says `Failed to create grabbing popup … parent window
+  has received input`.
+
+**For gnome-clipboard-history-native:** our design hits this exact class of bugs. We **do not rely
+on activation / `SetInputFocus`** at all — instead `GrabKeyboard` on root intercepts
+the keyboard entirely, and the target window never loses focus. This is precisely what
+CopyQ cannot achieve from Qt. As long as the grab succeeds, GNOME's
+focus-stealing-prevention doesn't get in our way — we don't ask for focus, we
+temporarily **capture it at the X level**. Risks to keep in mind:
+- `GrabKeyboard` may return `AlreadyGrabbed`/`Frozen` (another client holds the grab —
+  e.g. an open system menu). Handle the return code; on failure — retry with a short
+  backoff or quietly exit, **don't** show a "dead" popup without a keyboard (that's bug
+  #2960/#3325 in another wrapper).
+- The grab must be released (`UngrabKeyboard`) **before** the XTEST paste and on **any**
+  popup-close path (Esc, loss of visibility, selection). Otherwise the keyboard "sticks"
+  at root — the target window goes mute (analogous to the hang in #1729).
+
+### Global hotkey: why we were right to move to gsettings
+
+- **#1267** (open) — `Meta+V`/Super as a global shortcut **requires a double press** or
+  doesn't work; in GNOME it conflicts with the built-in Super+V. **The working solution
+  from the thread is exactly ours**: create a custom keybinding in GNOME settings that
+  runs `copyq -e "menu()"`/`toggle()`. Several users arrived at the same thing
+  independently.
+- **#3616** (closed) — on autostart the global shortcut **isn't registered without a
+  ~5 s delay** (the D-Bus portal isn't up yet); the fix is to connect to D-Bus later.
+- **#3488** (KDE/Wayland, open) — internal global shortcuts don't fire.
+
+**For gnome-clipboard-history-native:** confirmation that `XGrabKey(Super)` under mutter is a dead
+end (CopyQ collected the same pitfalls both via Qt and via the D-Bus portal), and
+**delegating the hotkey to GNOME itself via gsettings is the only reliable path**.
+Bonus: we don't depend on the D-Bus portal start race (#3616) — GNOME itself launches
+`gnome-clipboard-history-native --show`.
 
 ---
 
-## Механика X11 selection (PRIMARY vs CLIPBOARD, INCR, передача владения)
+## Layout / XKB and synthetic paste
 
-Пока мы владелец `CLIPBOARD`, эти ловушки — наши.
+Our most hard-won bug (the real keycode 'v' in the ru layout produces Cyrillic)
+manifests for CopyQ from other angles — but the root is the same: **keycode ≠ keysym,
+and synthetic input operates on keycodes.**
 
-### PRIMARY мы не трогаем — и это осознанная экономия боли
+- **#3378** (open) — shortcuts with numpad digits **get mismapped**: you assign
+  `Ctrl+Keypad1`, the UI shows `Ctrl+1`, and only the top row works. Cause (in the
+  thread): the hardware keycodes of the numpad and the top row are different, while the
+  Qt layer collapses them into one keysym. That is, Qt/CopyQ get confused precisely at
+  the level of keycode↔keysym mapping — the same layer where our 'v' bug lives.
+- **#3405** (open) — Chinese characters **are sometimes pasted as literal unicode** (not
+  as text), fixed by re-selecting from history. This is no longer XTEST but selection
+  format negotiation (see below), yet the symptom "the wrong thing got pasted" is the
+  same.
+- **#3253** (open) — a broken `Keyboard layout change (xneur like)` command — shows that
+  CopyQ users actively live in multi-layout environments; there is no direct XTEST
+  layout fix in CopyQ.
 
-CopyQ мониторит **и** CLIPBOARD, **и** PRIMARY (мышиную выборку) и бесконечно чинит
-их синхронизацию (это доминирующая категория багов в их истории релизов, см.
-`01-release-history-lessons.md`). **#1644** — отдельный сюжет про то, как PRIMARY
-вообще ловить (там про Wayland, но иллюстрирует, сколько внимания требует PRIMARY).
+**Conclusion about our approach.** There is **no** direct duplicate of our
+"synthetic 'v' → Cyrillic" bug in CopyQ's issue tracker — and that's probably because
+CopyQ sends **Shift+Insert**, and `Insert` is a key with no letter keysym, invariant to
+layout. This is essentially an **alternative solution to the same problem**: pick a
+paste key whose keysym doesn't depend on the XKB group.
 
-**Для gnome-clipboard-history-native:** мы читаем только CLIPBOARD и PRIMARY не ведём — это снимает целый
-пласт гонок selection↔selection. Держать это как принцип, не «улучшать».
+Hence two valid strategies, both legitimate:
 
-### INCR: большие клипы нельзя отдать одним куском
+1. **Our path — a temporary spare keycode remapped to 'v' in all groups**
+   (`XChangeKeyboardMapping` on an unused keycode → FakeInput on it → revert). Pro: we
+   send exactly Ctrl+V / Ctrl+Shift+V — the "native" combinations that all
+   GTK/Qt/browsers/terminals understand. Con: we mutate the global layout for
+   milliseconds (a race if someone is typing; you need `XGrabKeyboard`/`GrabServer`
+   during the remap and a mandatory rollback in `defer`).
+2. **CopyQ's path — paste with a layout-invariant key** (Insert+modifier), without
+   touching the mapping. Pro: we don't mutate the layout. Con: Shift+Insert is not
+   universal (#2557/#3196), in terminals and some apps it's not bound to paste; which is
+   exactly why CopyQ still has to detect the window and switch to Ctrl+Shift+V — where
+   'v' again runs into the layout (not a problem for them, since terminals often treat
+   the keycode, but in the general case — the same pit).
 
-- **#2233** (Wayland→XWayland, закрыто) — при вставке крупной картинки CopyQ отдал
-  **ровно 65536 байт (2^16) и оборвался**: `Failed to send all clipboard data; sent
-  65536 bytes out of 1686475`. Это классическая граница X11: selection крупнее
-  максимального размера property **обязана** передаваться по протоколу **INCR**
-  (порционно, через `PropertyNotify`).
-- **#3424** (X11, закрыто) — «CopyQ не вставляет большие элементы» (40+ строк) при
-  включённой Synchronize; элемент при этом ещё и **обнуляется**. hluk признаёт, что
-  вставка держится на **эвристике** и на больших/особых данных срабатывает не всегда.
+**Bottom line for gnome-clipboard-history-native:** our spare-keycode approach is **valid and
+probably more reliable** for the target set of applications (GTK/Qt/Chromium/VTE),
+because we send exactly the combinations these applications expect (Ctrl+V /
+Ctrl+Shift+V) rather than the compromise Shift+Insert. What must be verified in the
+implementation:
+- do the remap under `GrabServer`/`GrabKeyboard`, so no one sees a "half-baked" layout;
+  the keycode rollback goes in `defer`, even on panic;
+- find the spare keycode dynamically (empty in the current map), don't hardcode it —
+  otherwise a conflict on nonstandard layouts;
+- edge case: if the group is "shifted" (the layout switcher is on Ctrl/Shift) — our
+  synthetic Ctrl/Shift must not accidentally switch the group; test on ru+en with a
+  Shift switcher.
 
-**Для gnome-clipboard-history-native:** как владелец CLIPBOARD мы **обязаны реализовать серверную сторону
-INCR** для отдачи больших значений (особенно с приходом картинок — они сразу
-пробьют лимит property). Если полагаться на GTK-владение selection, INCR берёт на
-себя GTK — но если в будущем уйдём на чистый xgb-владелец, INCR-передачу (chunk по
-`PropertyNotify`, флаг `INCR` в первом ответе, финальный пустой chunk) писать
-самим. Пока владеет GTK — проверить, что крупные картинки реально доходят до
-`gimp`/LibreOffice (тот самый кейс #2233), а не режутся.
+---
 
-### Передача владения, `application/x-copyq-owner`, потеря буфера при выходе
+## X11 selection mechanics (PRIMARY vs CLIPBOARD, INCR, ownership transfer)
 
-- **#1960** (закрыто) — CopyQ **по умолчанию только мониторит** буфер и **не
-  перехватывает владение** на каждый клип: hluk прямо пишет, что перехват владения
-  на каждое изменение «оказался плохой идеей — путает приложения, роняет их
-  внутренние данные буфера». Пока владелец — приложение-источник, у клипа один
-  TARGET (`STRING`); полный набор (`text/plain`, `UTF8_STRING`, `TEXT`,
-  `TIMESTAMP`, `TARGETS`, `MULTIPLE`, `SAVE_TARGETS` и маркер
-  **`application/x-copyq-owner`**) появляется, только когда владение берёт CopyQ.
+While we own `CLIPBOARD`, these traps are ours.
 
-**Для gnome-clipboard-history-native — несколько важных следствий:**
-- **Маркер-владельца.** CopyQ помечает свои клипы `application/x-copyq-owner`, чтобы
-  **не зациклить** захват собственной вставки. Нам нужен аналог (свой mime-таргет
-  вроде `application/x-gchn-owner`): когда демон сам выставляет содержимое в
-  CLIPBOARD, монитор должен по маркеру понять «это моё» и **не** добавлять повторно
-  в историю. Иначе — дубликаты и потенциальные циклы (ср. Wayland copy-paste loop
+### We don't touch PRIMARY — and that's a deliberate saving of pain
+
+CopyQ monitors **both** CLIPBOARD **and** PRIMARY (the mouse selection) and endlessly
+fixes their synchronization (this is the dominant bug category in their release
+history, see `01-release-history-lessons.md`). **#1644** is a separate story about how
+to catch PRIMARY at all (it's about Wayland there, but it illustrates how much
+attention PRIMARY demands).
+
+**For gnome-clipboard-history-native:** we read only CLIPBOARD and don't maintain PRIMARY — this
+removes a whole layer of selection↔selection races. Keep this as a principle, don't
+"improve" it.
+
+### INCR: large clips can't be handed over in one chunk
+
+- **#2233** (Wayland→XWayland, closed) — pasting a large image, CopyQ handed over
+  **exactly 65536 bytes (2^16) and cut off**: `Failed to send all clipboard data; sent
+  65536 bytes out of 1686475`. This is the classic X11 boundary: a selection larger
+  than the maximum property size **must** be transferred via the **INCR** protocol
+  (in chunks, through `PropertyNotify`).
+- **#3424** (X11, closed) — "CopyQ doesn't paste large items" (40+ lines) with
+  Synchronize enabled; the item also gets **zeroed out**. hluk admits that paste rests
+  on a **heuristic** and doesn't always work on large/special data.
+
+**For gnome-clipboard-history-native:** as the owner of CLIPBOARD we **must implement the server
+side of INCR** for handing over large values (especially once images arrive — they'll
+blow past the property limit right away). If we rely on GTK ownership of the selection,
+INCR is handled by GTK — but if we ever move to a pure xgb owner, we'll have to write
+the INCR transfer ourselves (chunk via `PropertyNotify`, the `INCR` flag in the first
+reply, a final empty chunk). While GTK owns it — verify that large images actually
+reach `gimp`/LibreOffice (that same #2233 case) and aren't truncated.
+
+### Ownership transfer, `application/x-copyq-owner`, buffer loss on exit
+
+- **#1960** (closed) — CopyQ **by default only monitors** the buffer and **doesn't take
+  ownership** on every clip: hluk plainly writes that taking ownership on every change
+  "turned out to be a bad idea — it confuses applications, drops their internal buffer
+  data". While the owner is the source application, a clip has one TARGET (`STRING`);
+  the full set (`text/plain`, `UTF8_STRING`, `TEXT`, `TIMESTAMP`, `TARGETS`, `MULTIPLE`,
+  `SAVE_TARGETS`, and the marker **`application/x-copyq-owner`**) appears only when
+  CopyQ takes ownership.
+
+**For gnome-clipboard-history-native — several important consequences:**
+- **Owner marker.** CopyQ tags its clips with `application/x-copyq-owner` so as **not to
+  loop** on capturing its own paste. We need an analogue (our own mime target like
+  `application/x-gchn-owner`): when the daemon itself puts content into CLIPBOARD, the
+  monitor should recognize "this is mine" by the marker and **not** re-add it to
+  history. Otherwise — duplicates and potential loops (cf. the Wayland copy-paste loop
   #2224).
-- **Владение = ответственность отдавать по запросу.** Раз демон владеет CLIPBOARD
-  через GTK «пока жив», при выходе демона **буфер очистится** (владелец исчез) —
-  классическая жалоба на менеджеры X11. Варианты: (а) не брать владение постоянно,
-  а только на момент вставки; (б) при выходе передать содержимое через
-  `SAVE_TARGETS`/clipboard-manager-протокол. Сейчас у нас (а)-подобный сценарий
-  предпочтителен: минимизировать время владения снижает и риск «путать приложения»
-  из #1960.
-- **Не перетирать буфер без нужды.** Урок #1960 + история релизов: агрессивно
-  становиться владельцем на каждое изменение — вредно. Мы и не должны: берём
-  владение только когда пользователь выбрал старый элемент для вставки.
-- **`TIMESTAMP` против лишних перечиток.** Из истории релизов CopyQ: использовать
-  таргет `TIMESTAMP`, чтобы не перечитывать неизменившийся буфер — защита от
-  залипаний и дублей. Если будем читать CLIPBOARD поллингом/по событию — сверять
-  TIMESTAMP перед тем, как тянуть данные.
+- **Ownership = responsibility to serve on request.** Since the daemon owns CLIPBOARD
+  through GTK "while alive", when the daemon exits the **buffer will clear** (the owner
+  is gone) — the classic complaint about X11 managers. Options: (a) don't hold ownership
+  permanently, only for the moment of paste; (b) on exit, hand the content off via the
+  `SAVE_TARGETS`/clipboard-manager protocol. For now an (a)-like scenario is preferable:
+  minimizing ownership time also reduces the risk of "confusing applications" from
+  #1960.
+- **Don't clobber the buffer needlessly.** The lesson of #1960 + release history:
+  aggressively becoming the owner on every change is harmful. And we shouldn't: we take
+  ownership only when the user selects an old item to paste.
+- **`TIMESTAMP` against redundant re-reads.** From CopyQ's release history: use the
+  `TIMESTAMP` target to avoid re-reading an unchanged buffer — protection against
+  stalls and duplicates. If we read CLIPBOARD by polling / by event — compare TIMESTAMP
+  before pulling the data.
 
-### Нормализация форматов: осторожно с переносами и кодировками
+### Format normalization: careful with newlines and encodings
 
-- **#2168** (закрыто) — CopyQ **менял `\n` на `\r\n`** (LF→CRLF) из-за кода
-  «Wayland: fix synchronizing UTF-8». Побочка нормализации UTF-8 испортила
-  содержимое на X11.
-- **#3405** — китайский текст иногда деградировал в literal-unicode.
+- **#2168** (closed) — CopyQ **changed `\n` to `\r\n`** (LF→CRLF) because of the code
+  "Wayland: fix synchronizing UTF-8". A side effect of UTF-8 normalization corrupted the
+  content on X11.
+- **#3405** — Chinese text sometimes degraded into literal unicode.
 
-**Для gnome-clipboard-history-native:** отдавать данные **байт-в-байт**, как получили. Не «чинить»
-переносы, не перекодировать. Если поддерживаем несколько таргетов (`UTF8_STRING`,
-`text/plain;charset=utf-8`, `STRING`) — на `STRING` (latin-1) отдавать только
-ASCII-safe, для юникода строго `UTF8_STRING`/`text/plain;charset=utf-8`, иначе
-получим #3405.
+**For gnome-clipboard-history-native:** hand over data **byte-for-byte**, as received. Don't "fix"
+newlines, don't re-encode. If we support multiple targets (`UTF8_STRING`,
+`text/plain;charset=utf-8`, `STRING`) — for `STRING` (latin-1) hand over only ASCII-safe
+data, for unicode strictly `UTF8_STRING`/`text/plain;charset=utf-8`, otherwise we get
+#3405.
 
 ---
 
-## Wayland — что не работает и почему
+## Wayland — what doesn't work and why
 
-gnome-clipboard-history-native — X11-only, и issues CopyQ объясняют, **почему** это разумно и **что**
-понадобилось бы для гипотетического Wayland-бэкенда. Короткий вывод: под GNOME
-Wayland полноценный менеджер буфера с попапом-у-курсора и синтетической вставкой
-**в принципе невозможен** штатными средствами; работает только на wlroots
-(Sway/Hyprland) и то с внешними костылями.
+gnome-clipboard-history-native is X11-only, and CopyQ's issues explain **why** that is reasonable
+and **what** would be needed for a hypothetical Wayland backend. Short conclusion: under
+GNOME Wayland a full clipboard manager with a popup-at-cursor and synthetic paste is
+**fundamentally impossible** with stock means; it works only on wlroots (Sway/Hyprland),
+and even then with external hacks.
 
-### 1. Чтение буфера: нужен спец-протокол, которого в GNOME Wayland нет
+### 1. Reading the buffer: needs a special protocol that GNOME Wayland lacks
 
-Под Wayland обычное приложение **не видит** чужой буфер — нужен привилегированный
-протокол «data-control»:
-- **wlr-data-control-unstable-v1** (wlroots: Sway, Hyprland) или новее
-  **ext-data-control-v1** (#3294 — Sway 1.11 добавил его; регрессия мониторинга при
-  переходе на него), либо `COSMIC_DATA_CONTROL_ENABLED=1` в Cosmic (#2847).
-- **GNOME Wayland (mutter) этих протоколов не реализует.** Поэтому CopyQ под GNOME
-  Wayland запускает монитор буфера **как X11-приложение через XWayland** (см. детект
-  `XAUTHORITY includes 'mutter-Xwayland'` в Wayland-support-скрипте, #2747). То есть
-  «поддержка GNOME Wayland» у CopyQ — это на самом деле X11-путь под XWayland, со
-  всеми его ограничениями (не видит нативные Wayland-клипы).
+Under Wayland an ordinary application **cannot see** another app's buffer — you need the
+privileged "data-control" protocol:
+- **wlr-data-control-unstable-v1** (wlroots: Sway, Hyprland) or the newer
+  **ext-data-control-v1** (#3294 — Sway 1.11 added it; a monitoring regression when
+  moving to it), or `COSMIC_DATA_CONTROL_ENABLED=1` in Cosmic (#2847).
+- **GNOME Wayland (mutter) doesn't implement these protocols.** So under GNOME Wayland
+  CopyQ runs the buffer monitor **as an X11 application through XWayland** (see the
+  detection `XAUTHORITY includes 'mutter-Xwayland'` in the Wayland-support script,
+  #2747). That is, CopyQ's "GNOME Wayland support" is actually the X11 path under
+  XWayland, with all its limitations (it can't see native Wayland clips).
 
-Симптомы, когда протокола нет/он тормозит:
-- **#1243**, **#2847** — «No clipboard content», лог `Activating Wayland clipboard
+Symptoms when the protocol is missing / slow:
+- **#1243**, **#2847** — "No clipboard content", log `Activating Wayland clipboard
   took 5000 ms → Failed to activate Wayland clipboard`, `Null data in selection`.
-- **#3125** (открыто) — при доступе к **собственному** буферу CopyQ **фризит на ~1 c**:
+- **#3125** (open) — when accessing its **own** buffer CopyQ **freezes for ~1 s**:
   `DataControlOffer: timeout reading from pipe`, `ELAPSED 1010 ms accessing …`.
-  hluk: «Wayland clipboard management — это бардак»; данные передаются через unix-pipe
-  в том же GUI-потоке, который на этом и блокируется. Многопоточный обход давал
-  редкие краши.
-- **#1644** — PRIMARY (мышиная выборка) под Wayland ловится только через
-  data-control и только если компоненты (GTK/Qt) его поддерживают.
-- **#1917**, **#2224** — на Sway CopyQ **жрёт ядро** / уходит в **copy-paste-loop** и
-  вешает DE.
+  hluk: "Wayland clipboard management is a mess"; data is transferred through a unix
+  pipe in the same GUI thread, which blocks on it. A multi-threaded workaround gave rare
+  crashes.
+- **#1644** — PRIMARY (the mouse selection) under Wayland is caught only via
+  data-control, and only if the components (GTK/Qt) support it.
+- **#1917**, **#2224** — on Sway CopyQ **eats a core** / goes into a **copy-paste loop**
+  and hangs the DE.
 
-### 2. Синтетическая вставка: XTEST не работает, нужен ydotool/wtype
+### 2. Synthetic paste: XTEST doesn't work, you need ydotool/wtype
 
-Под нативным Wayland `XTestFakeKeyEvent` **не действует** (нет X-сервера для
-инъекции в фокус). CopyQ обходит это внешними тулзами в Wayland-support-скрипте:
-- **ydotool** — требует демона с доступом к `/dev/uinput` (root/группа), генерит
-  ввод на уровне ядра. Хрупко в настройке: **#2747** (Hyprland) — работает из
-  терминала, но не из `exec-once`/systemd-автостарта (проблемы с окружением/правами
-  сервиса), лечится ручным перезапуском.
-- **wtype** — альтернатива для wlroots; под GNOME не работает.
-- Терминалы всё так же требуют выбора Shift+Insert vs Ctrl+Shift+V по заголовку
-  окна (**#2557**) — только получить заголовок окна под Wayland тоже нельзя штатно
-  (в KDE `currentWindowTitle` не поддерживается, отмечено в самом скрипте #2747).
+Under native Wayland `XTestFakeKeyEvent` **has no effect** (there's no X server to
+inject into the focus). CopyQ works around this with external tools in the
+Wayland-support script:
+- **ydotool** — requires a daemon with access to `/dev/uinput` (root/group), generates
+  input at the kernel level. Fragile to set up: **#2747** (Hyprland) — works from a
+  terminal but not from `exec-once`/systemd autostart (service environment/permission
+  problems), fixed by a manual restart.
+- **wtype** — an alternative for wlroots; doesn't work under GNOME.
+- Terminals still require choosing Shift+Insert vs Ctrl+Shift+V by window title
+  (**#2557**) — except getting the window title under Wayland is also impossible with
+  stock means (in KDE `currentWindowTitle` isn't supported, noted in the script itself
+  #2747).
 
-**Как это решено у нас.** Мы не спавним `ydotool` — держим собственное долгоживущее
-`/dev/uinput`-устройство in-process (`internal/uinput`) и шлём раскладко-независимый
-`Shift+Insert` (работает и в GUI, и в терминалах — детект окна не нужен). Проблему
-«хрупкой настройки прав» (#2747) закрываем авто-настройкой `uinput_setup.go`:
-`--install`/`--setup-input` кладут udev-правило (эскалация pkexec/sudo через ре-экзек
-своего бинарника), `.deb`/`.rpm` — статически из того же текста. Правило комбинированное:
-- **`TAG+="uaccess"`** — logind вешает ACL на активного пользователя сразу, без
-  релогина (mainline systemd: GNOME/Ubuntu/Fedora/Arch). Узко: только этот юзер, только
-  `uinput`. Проверено — `getfacl /dev/uinput` показывает `user:<you>:rw-` сразу.
-- **`GROUP="input"` + `usermod -aG`** — fallback, если logind не выдал ACL; требует
-  повторного входа, шире по правам (все input-устройства).
+**How we solved this.** We don't spawn `ydotool` — we hold our own long-lived
+`/dev/uinput` device in-process (`internal/uinput`) and send a layout-independent
+`Shift+Insert` (works in both GUI and terminals — no window detection needed). We close
+the "fragile permission setup" problem (#2747) with the auto-setup in
+`uinput_setup.go`: `--install`/`--setup-input` install a udev rule (pkexec/sudo
+escalation via re-exec of our own binary), `.deb`/`.rpm` — statically from the same
+text. The rule is combined:
+- **`TAG+="uaccess"`** — logind puts an ACL on the active user immediately, without
+  re-login (mainline systemd: GNOME/Ubuntu/Fedora/Arch). Narrow: only this user, only
+  `uinput`. Verified — `getfacl /dev/uinput` shows `user:<you>:rw-` right away.
+- **`GROUP="input"` + `usermod -aG`** — a fallback if logind didn't grant the ACL;
+  requires a re-login, broader in permissions (all input devices).
 
-Единоразовость критична: перед эскалацией проверяем `uinput.HasAccess()` — если доступ
-уже есть, sudo/pkexec НЕ дёргаем. Автостарт-демон правит только логирует подсказку, не
-эскалируется (в non-interactive промпт недопустим).
+The one-time nature is critical: before escalating we check `uinput.HasAccess()` — if
+access already exists, we do NOT invoke sudo/pkexec. The autostart daemon only logs a
+hint, it doesn't escalate (a prompt in a non-interactive context is unacceptable).
 
-**Будущий root-free путь — libei/RemoteDesktop-портал.** `org.freedesktop.portal.RemoteDesktop`
-+ libei даёт Wayland-native инжект без прав на `/dev/uinput` (диалог разрешения вместо
-udev). Пока вне рамок: нет зрелого чистого Go-биндинга (cgo к `libei`/`liboeffis` +
-свежий `xdg-desktop-portal`, неравномерно на старых Ubuntu LTS), нужна D-Bus-переговорка
-и диалог на сеанс. Кандидат на миграцию, когда биндинги созреют.
+**A future root-free path — libei/RemoteDesktop portal.**
+`org.freedesktop.portal.RemoteDesktop` + libei gives Wayland-native injection without
+`/dev/uinput` permissions (a permission dialog instead of udev). Out of scope for now:
+there's no mature pure-Go binding (cgo to `libei`/`liboeffis` + a recent
+`xdg-desktop-portal`, patchy on old Ubuntu LTS), it needs D-Bus negotiation and a
+per-session dialog. A migration candidate once the bindings mature.
 
-### 3. Позиционирование и фокус попапа: Wayland это запрещает by design
+### 3. Popup positioning and focus: Wayland forbids this by design
 
-- `Wayland does not support QWindow::requestActivate()` (**#3237**, #2233) — окно
-  **не может** запросить себе фокус.
-- Нельзя **задать позицию** окна на экране и **узнать позицию курсора** →
-  «show under mouse cursor» невозможен (**#3331**, #1982-комментарий hluk).
-- Popup-грабы требуют `transientParent`, получившего ввод, иначе
-  `Failed to create grabbing popup` (**#3325**); под Qt 6.9+ Wayland-попапы вообще
-  перестали показываться (**#3108**), на KDE popup не виден (**#3237**).
-- Не-native Qt-нотификации не работают (нет позиционирования) — только через
-  notification-демон (#3237).
-- Глобальные шорткаты — только через D-Bus GlobalShortcuts-портал, с гонкой старта
-  (#3616) и багами (#3488).
+- `Wayland does not support QWindow::requestActivate()` (**#3237**, #2233) — a window
+  **cannot** request focus for itself.
+- You cannot **set a window's position** on screen or **query the cursor position** →
+  "show under mouse cursor" is impossible (**#3331**, hluk's comment in #1982).
+- Popup grabs require a `transientParent` that has received input, otherwise
+  `Failed to create grabbing popup` (**#3325**); under Qt 6.9+ Wayland popups stopped
+  showing at all (**#3108**), on KDE the popup isn't visible (**#3237**).
+- Non-native Qt notifications don't work (no positioning) — only through the
+  notification daemon (#3237).
+- Global shortcuts — only through the D-Bus GlobalShortcuts portal, with a start race
+  (#3616) and bugs (#3488).
 
-### Вердикт по осуществимости Wayland-бэкенда gnome-clipboard-history-native
+### Verdict on the feasibility of a gnome-clipboard-history-native Wayland backend
 
-- **GNOME Wayland: нецелесообразно.** mutter не даёт ни data-control (чтение
-  буфера), ни позиционирования попапа, ни синтетической вставки, ни фокуса. Всё,
-  что «работает» у CopyQ под GNOME Wayland — это XWayland-костыль, который не видит
-  нативные клипы и всё равно упирается в XTEST. Наш попап-у-курсора и grab-фокус
-  там нереализуемы.
-- **wlroots (Sway/Hyprland): технически возможно, но дорого и хрупко.** Понадобится:
-  (1) `ext-data-control-v1`/`wlr-data-control` для мониторинга и владения буфером
-  (с учётом блокирующих pipe-чтений #3125 → выносить в отдельный поток/процесс);
-  (2) `ydotool`(uinput, root) или `wtype` для вставки, плюс детект терминала без
-  штатного window-title; (3) `zwlr-layer-shell` для показа попапа поверх (в т.ч. над
-  fullscreen, #2953) — обычные Wayland-окна позицию не задают.
-- **Практический вывод: оставаться X11-only — правильно.** Если когда-нибудь
-  Wayland — то **только wlroots** и **отдельным бэкендом** (data-control + layer-shell
-  + ydotool), а не «портированием» X11-логики. GNOME Wayland вычёркиваем до тех пор,
-  пока mutter не даст data-control-протокол.
-
----
-
-## GNOME / mutter специфика
-
-- **Focus-stealing prevention.** GNOME/mutter отказывает окнам в активации — это
-  #2960/#2993/#3325 у CopyQ. Наш override-redirect попап + `GrabKeyboard` на root
-  **обходит** это: мы не участвуем в WM-политике активации. Держать это как ключевое
-  преимущество и не ломать (не звать `SetInputFocus`, не просить `_NET_ACTIVE_WINDOW`
-  на себя).
-- **Override-redirect vs анимации hide.** #1729 показывает, что managed-окно при
-  сворачивании с анимацией подвешивает XTEST-вставку. Наш override-redirect не
-  анимируется WM — просто скрываем/уничтожаем. Сохранять этот путь; между hide
-  попапа и FakeInput всё равно оставить микропаузу.
-- **Multi-monitor / позиционирование попапа.** **#3608** — фундаментальная ловушка:
-  `_NET_WORKAREA` в EWMH — **один прямоугольник на весь виртуальный десктоп**, он
-  физически не описывает доступную область **на каждый монитор**. Qt берёт
-  `_NET_WORKAREA ∩ screenRect` и на вторичных мониторах получает мусор (окно
-  улетает вниз, высота обрезается по высоте лаптопа). **Для gnome-clipboard-history-native:** позицию попапа
-  у курсора считать по **RandR CRTC** (геометрия конкретного вывода под курсором),
-  **не** по `_NET_WORKAREA`. Границы монитора брать из `RRGetCrtcInfo`/
-  `xinerama`-экрана, в который попал курсор; клампить попап в этот прямоугольник, а
-  не в общий workarea.
-- **«Show under cursor» с первого раза.** #1982 — у CopyQ первый показ ставит окно
-  не туда (WM restore-geometry перетирает позицию managed-окна). Наш
-  override-redirect ставит позицию сам (`ConfigureWindow` x/y), WM её не
-  «восстанавливает» — так что этот баг у нас не воспроизводится, **если** мы не
-  полагаемся на сохранённую WM-геометрию. Позицию всегда задавать явно при каждом
-  показе.
-- **HiDPI/масштаб.** CopyQ ловил проблемы масштабирования на Hyprland (#2744) —
-  под X11 с дробным масштабом координаты курсора и геометрия окна в device pixels
-  vs logical pixels расходятся. Для gnome-clipboard-history-native: работаем в X11-пикселях (RandR/xgb
-  отдаёт device px), GTK может масштабировать контент по `GDK_SCALE` — следить, что
-  позиция попапа считается в тех же единицах, что и курсор (raw X pixels), а размер
-  окна — с учётом GTK-scale.
-- **Меню/трей.** Не наш кейс (у нас свой попап, не Qt-tray-menu), но #3325 полезен
-  как напоминание: grab-попапы под композитором капризны; наш root-grab надёжнее,
-  чем WM-managed grabbing popup.
+- **GNOME Wayland: not worthwhile.** mutter gives neither data-control (reading the
+  buffer), nor popup positioning, nor synthetic paste, nor focus. Everything that
+  "works" for CopyQ under GNOME Wayland is an XWayland hack that can't see native clips
+  and still runs into XTEST anyway. Our popup-at-cursor and grab-focus are not
+  implementable there.
+- **wlroots (Sway/Hyprland): technically possible, but expensive and fragile.** You'd
+  need: (1) `ext-data-control-v1`/`wlr-data-control` for monitoring and owning the
+  buffer (accounting for the blocking pipe reads of #3125 → move to a separate
+  thread/process); (2) `ydotool` (uinput, root) or `wtype` for paste, plus terminal
+  detection without a stock window title; (3) `zwlr-layer-shell` to show the popup on
+  top (including over fullscreen, #2953) — ordinary Wayland windows don't set a
+  position.
+- **Practical conclusion: staying X11-only is right.** If Wayland ever — then **only
+  wlroots** and **as a separate backend** (data-control + layer-shell + ydotool), not by
+  "porting" the X11 logic. We cross off GNOME Wayland until mutter provides a
+  data-control protocol.
 
 ---
 
-## Выводы для gnome-clipboard-history-native (чеклист)
+## GNOME / mutter specifics
 
-**Вставка / XTEST:**
-- [ ] Между FakeInput(press) и FakeInput(release) держать паузу **~30–50 мс** на
-      клавишу (дефолт CopyQ 50 мс; `0` ломает Chrome). Конфигурируемо. #1729
-- [ ] **Не** делать XSync между press и release в одном пакете (баг дубликатов
+- **Focus-stealing prevention.** GNOME/mutter denies windows activation — this is
+  #2960/#2993/#3325 for CopyQ. Our override-redirect popup + `GrabKeyboard` on root
+  **bypasses** it: we don't participate in the WM activation policy. Keep this as a key
+  advantage and don't break it (don't call `SetInputFocus`, don't request
+  `_NET_ACTIVE_WINDOW` on ourselves).
+- **Override-redirect vs hide animations.** #1729 shows that a managed window, when
+  minimized with animation, stalls the XTEST paste. Our override-redirect isn't animated
+  by the WM — we just hide/destroy it. Preserve this path; still leave a micro-pause
+  between hiding the popup and FakeInput.
+- **Multi-monitor / popup positioning.** **#3608** — a fundamental trap: `_NET_WORKAREA`
+  in EWMH is **one rectangle for the whole virtual desktop**, it physically doesn't
+  describe the available area **per monitor**. Qt takes `_NET_WORKAREA ∩ screenRect` and
+  on secondary monitors gets garbage (the window flies down, the height is clipped to
+  the laptop's height). **For gnome-clipboard-history-native:** compute the popup position at the
+  cursor from the **RandR CRTC** (the geometry of the specific output under the cursor),
+  **not** from `_NET_WORKAREA`. Take the monitor bounds from
+  `RRGetCrtcInfo`/the `xinerama` screen the cursor landed in; clamp the popup to that
+  rectangle, not to the overall workarea.
+- **"Show under cursor" on the first try.** #1982 — CopyQ's first show places the window
+  in the wrong spot (WM restore-geometry overwrites the managed window's position). Our
+  override-redirect sets the position itself (`ConfigureWindow` x/y), the WM doesn't
+  "restore" it — so this bug doesn't reproduce for us, **as long as** we don't rely on a
+  saved WM geometry. Always set the position explicitly on every show.
+- **HiDPI/scaling.** CopyQ hit scaling problems on Hyprland (#2744) — under X11 with
+  fractional scaling the cursor coordinates and window geometry in device pixels vs
+  logical pixels diverge. For gnome-clipboard-history-native: we work in X11 pixels (RandR/xgb
+  returns device px), GTK may scale content by `GDK_SCALE` — watch that the popup
+  position is computed in the same units as the cursor (raw X pixels), while the window
+  size accounts for GTK scale.
+- **Menus/tray.** Not our case (we have our own popup, not a Qt tray menu), but #3325 is
+  useful as a reminder: grab popups under a compositor are finicky; our root grab is more
+  reliable than a WM-managed grabbing popup.
+
+---
+
+## Conclusions for gnome-clipboard-history-native (checklist)
+
+**Paste / XTEST:**
+- [ ] Keep a pause of **~30–50 ms** per key between FakeInput(press) and
+      FakeInput(release) (CopyQ default 50 ms; `0` breaks Chrome). Configurable. #1729
+- [ ] Do **not** XSync between press and release in one packet (the duplication bug
       #1729/#2116).
-- [ ] Пауза между hide попапа / ungrab и началом вставки (аналог
-      `window_wait_after_raised_ms`), чтобы фокус успел вернуться. #1729
-- [ ] `UngrabKeyboard` **обязательно** перед XTEST и на **любом** пути закрытия
-      попапа — иначе целевое окно онемеет. #2960/#3325
-- [ ] Проверять код возврата `GrabKeyboard` (`AlreadyGrabbed`/`Frozen`) — при
-      неудаче не показывать безклавиатурный попап. #2960/#3325
-- [ ] Мапа «WM_CLASS → комбинация вставки», а не булев «терминал»: Ctrl+Shift+V для
-      VTE/kitty/alacritty/ghostty/wezterm; Shift+Insert для xterm/urxvt; Ctrl+V —
-      дефолт. Список расширяемый. #2557/#3196
-- [ ] Запоминать `_NET_ACTIVE_WINDOW` при `--show`, сверять перед вставкой — не
-      вставить в чужое окно.
+- [ ] A pause between hiding the popup / ungrab and starting the paste (analogue of
+      `window_wait_after_raised_ms`), so focus has time to return. #1729
+- [ ] `UngrabKeyboard` **mandatory** before XTEST and on **any** popup-close path —
+      otherwise the target window goes mute. #2960/#3325
+- [ ] Check the `GrabKeyboard` return code (`AlreadyGrabbed`/`Frozen`) — on failure
+      don't show a keyboardless popup. #2960/#3325
+- [ ] A "WM_CLASS → paste combination" map, not a boolean "terminal": Ctrl+Shift+V for
+      VTE/kitty/alacritty/ghostty/wezterm; Shift+Insert for xterm/urxvt; Ctrl+V — the
+      default. Extensible list. #2557/#3196
+- [ ] Remember `_NET_ACTIVE_WINDOW` at `--show`, verify before paste — don't paste into
+      the wrong window.
 
-**Раскладка / XKB:**
-- [ ] spare-keycode ремап делать под `GrabServer`/`GrabKeyboard`; откат keycode в
-      `defer` (даже на панике). #3378 (та же keycode↔keysym яма)
-- [ ] Запасной keycode искать динамически (пустой слот), не хардкодить.
-- [ ] Тест на ru+en с переключателем группы по Shift/Ctrl — наши синтетические
-      модификаторы не должны переключить раскладку.
+**Layout / XKB:**
+- [ ] Do the spare-keycode remap under `GrabServer`/`GrabKeyboard`; the keycode rollback
+      in `defer` (even on panic). #3378 (the same keycode↔keysym pit)
+- [ ] Find the spare keycode dynamically (an empty slot), don't hardcode it.
+- [ ] Test on ru+en with a group switcher on Shift/Ctrl — our synthetic modifiers must
+      not switch the layout.
 
 **Selection:**
-- [ ] PRIMARY не трогать вообще — только CLIPBOARD (экономит пласт гонок). #1644
-- [ ] Реализовать/проверить **INCR** для отдачи больших значений (обязательно к
-      приходу картинок — #2233 режет на 64 КБ). #2233/#3424
-- [ ] Маркер `application/x-gchn-owner` на своих клипах → монитор игнорит
-      собственную вставку (нет дублей/циклов). #1960/#2224
-- [ ] Владеть CLIPBOARD **минимально по времени** (в идеале только на момент
-      вставки), чтобы не путать приложения и не терять буфер при выходе демона.
+- [ ] Don't touch PRIMARY at all — only CLIPBOARD (saves a layer of races). #1644
+- [ ] Implement/verify **INCR** for handing over large values (mandatory once images
+      arrive — #2233 cuts off at 64 KB). #2233/#3424
+- [ ] A `application/x-gchn-owner` marker on our own clips → the monitor ignores our own
+      paste (no duplicates/loops). #1960/#2224
+- [ ] Own CLIPBOARD **for a minimal time** (ideally only for the moment of paste), so as
+      not to confuse applications and not to lose the buffer when the daemon exits.
       #1960
-- [ ] Отдавать данные **байт-в-байт**: не менять `\n`→`\r\n`, не перекодировать;
-      юникод — строго `UTF8_STRING`/`text/plain;charset=utf-8`. #2168/#3405
-- [ ] Сверять `TIMESTAMP` перед перечиткой неизменного буфера. (история релизов)
+- [ ] Hand over data **byte-for-byte**: don't change `\n`→`\r\n`, don't re-encode;
+      unicode — strictly `UTF8_STRING`/`text/plain;charset=utf-8`. #2168/#3405
+- [ ] Compare `TIMESTAMP` before re-reading an unchanged buffer. (release history)
 
-**Фокус / хоткей / позиционирование (GNOME X11):**
-- [ ] Хоткей — только gsettings custom keybinding (`gnome-clipboard-history-native --show`), не
-      `XGrabKey(Super)`; не зависим от D-Bus-гонки. #1267/#3616
-- [ ] Не звать `SetInputFocus`/`requestActivate` на попап — grab-фокус вместо
-      активации обходит focus-stealing-prevention. #2960/#2993
-- [ ] Override-redirect попап (без WM-анимации hide) — сохранять как защиту от
-      #1729.
-- [ ] Позицию попапа считать по **RandR CRTC** под курсором, **не** по
-      `_NET_WORKAREA` (он один на весь desktop → мусор на вторичных мониторах).
-      Позицию задавать явно при каждом показе. #3608/#1982
-- [ ] Координаты курсора и позицию попапа держать в одних единицах (raw X px);
-      учитывать GTK-scale только для размера контента. #2744
+**Focus / hotkey / positioning (GNOME X11):**
+- [ ] Hotkey — only a gsettings custom keybinding (`gnome-clipboard-history-native --show`),
+      not `XGrabKey(Super)`; independent of the D-Bus race. #1267/#3616
+- [ ] Don't call `SetInputFocus`/`requestActivate` on the popup — grab-focus instead of
+      activation bypasses focus-stealing-prevention. #2960/#2993
+- [ ] Override-redirect popup (no WM hide animation) — keep as protection against #1729.
+- [ ] Compute the popup position from the **RandR CRTC** under the cursor, **not** from
+      `_NET_WORKAREA` (which is one for the whole desktop → garbage on secondary
+      monitors). Set the position explicitly on every show. #3608/#1982
+- [ ] Keep the cursor coordinates and popup position in the same units (raw X px);
+      account for GTK scale only for content size. #2744
 
 **Wayland:**
-- [ ] Оставаться X11-only. GNOME Wayland — вычёркнуто (mutter не даёт data-control,
-      позиционирование, XTEST, фокус). #1243/#2847/#3237/#3331
-- [ ] Если когда-нибудь Wayland — только wlroots, отдельным бэкендом:
-      `ext-data-control-v1` + `zwlr-layer-shell` + `ydotool`/`wtype`, с выносом
-      блокирующих pipe-чтений буфера из главного потока. #3294/#3125/#2747/#2953
+- [ ] Stay X11-only. GNOME Wayland — crossed off (mutter gives no data-control,
+      positioning, XTEST, focus). #1243/#2847/#3237/#3331
+- [ ] If Wayland ever — only wlroots, as a separate backend: `ext-data-control-v1` +
+      `zwlr-layer-shell` + `ydotool`/`wtype`, moving the blocking pipe reads of the
+      buffer off the main thread. #3294/#3125/#2747/#2953

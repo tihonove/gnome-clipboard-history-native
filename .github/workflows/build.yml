@@ -1,19 +1,19 @@
 name: Build
 
-# Переиспользуемая сборка бинарника под Linux/x64.
-# Приложение работает только на X11/GNOME — поэтому одна цель, без macOS/Windows.
-# Вызывается из release.yml через workflow_call, либо вручную (workflow_dispatch).
+# Reusable build of the Linux/x64 binary.
+# The app runs only on X11/GNOME — hence a single target, no macOS/Windows.
+# Called from release.yml via workflow_call, or manually (workflow_dispatch).
 on:
   workflow_call:
     inputs:
       version:
-        description: "Версия, зашиваемая в бинарник (релиз: vX.Y.Z)"
+        description: "Version baked into the binary (release: vX.Y.Z)"
         required: false
         type: string
   workflow_dispatch:
     inputs:
       version:
-        description: "Версия, зашиваемая в бинарник"
+        description: "Version baked into the binary"
         required: false
         type: string
 
@@ -27,7 +27,7 @@ jobs:
         with:
           go-version: "1.23"
 
-      # cgo-сборка gotk3 требует заголовков GTK3.
+      # The cgo build of gotk3 requires the GTK3 headers.
       - name: Install GTK dev
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
 
@@ -36,7 +36,7 @@ jobs:
         shell: bash
         run: |
           V="${{ inputs.version }}"
-          V="${V#v}"                                   # срезать ведущую v из тега
+          V="${V#v}"                                   # strip the leading v from the tag
           [ -z "$V" ] && V="$(cat VERSION 2>/dev/null || echo dev)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 

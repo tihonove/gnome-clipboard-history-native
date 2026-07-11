@@ -1,17 +1,17 @@
-# Конфиг golangci-lint (формат v2). Запуск: golangci-lint run
+# golangci-lint config (v2 format). Run: golangci-lint run
 version: "2"
 
 linters:
-  # стандартный набор: errcheck, govet, ineffassign, staticcheck, unused
+  # standard set: errcheck, govet, ineffassign, staticcheck, unused
   default: standard
   enable:
     - misspell
   settings:
     errcheck:
-      # Fire-and-forget по замыслу: best-effort вызовы, где ошибку
-      # осмысленно обработать нечем (сокетные «звонки», gsettings, X-запросы,
-      # kernel-write в uinput). Reply() у xgb-куки — синхронизирующий round-trip,
-      # результат не нужен.
+      # Fire-and-forget by design: best-effort calls where there's nothing
+      # meaningful to do with the error (socket "rings", gsettings, X requests,
+      # kernel writes to uinput). Reply() on an xgb cookie is a synchronizing round-trip;
+      # the result isn't needed.
       exclude-functions:
         - (net.Conn).Write
         - (net.Conn).Close
@@ -21,7 +21,7 @@ linters:
         - (*os/exec.Cmd).Run
         - (github.com/jezek/xgb/xproto.GetInputFocusCookie).Reply
         - (github.com/jezek/xgb/xfixes.QueryVersionCookie).Reply
-        # gdk-pixbuf loader Close: pixbuf уже получен из WriteAndReturnPixbuf
+        # gdk-pixbuf loader Close: the pixbuf is already obtained from WriteAndReturnPixbuf
         - (*github.com/gotk3/gotk3/gdk.PixbufLoader).Close
 
 formatters:

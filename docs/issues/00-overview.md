@@ -1,124 +1,130 @@
-# Разбор CopyQ: что мы могли упустить
+# CopyQ postmortem: what we might have missed
 
-Эта папка — конспект чужого опыта. Мы разобрали issue-трекер и историю релизов
-[hluk/CopyQ](https://github.com/hluk/CopyQ) (11.9k звёзд, 87 релизов, 2014→2026) с
-одной целью: **понять, что gnome-clipboard-history-native при нашем минималистичном позиционировании
-(`Win+V`-аналог для GNOME/X11) мог упустить** — какие грабли неизбежны для любого
-X11-менеджера буфера, какие дешёвые фичи мы зря не сделали, и на что заранее
-заложиться перед приходом картинок.
+This folder is a digest of someone else's experience. We went through the issue
+tracker and release history of
+[hluk/CopyQ](https://github.com/hluk/CopyQ) (11.9k stars, 87 releases, 2014→2026)
+with one goal: **to understand what gnome-clipboard-history-native, given our minimalist
+positioning (a `Win+V` equivalent for GNOME/X11), might have missed** — which
+pitfalls are inevitable for any X11 clipboard manager, which cheap features we
+foolishly skipped, and what to prepare for in advance before images arrive.
 
-CopyQ — «комбайн» (скрипты, табы, синк, шифрование), мы — один список у курсора.
-Мы **не копируем** CopyQ; мы снимаем с него уже оплаченные баги.
+CopyQ is a "combine harvester" (scripts, tabs, sync, encryption); we are a single
+list at the cursor. We are **not copying** CopyQ; we're harvesting the bugs it has
+already paid for.
 
-## Как читать эту папку
+## How to read this folder
 
-| Файл | О чём | Кому в первую очередь |
-|------|-------|-----------------------|
-| [01-release-history-lessons.md](01-release-history-lessons.md) | 14 повторяющихся тем за 12 лет релизов: что чинилось снова и снова = структурные ловушки платформы. | Общая картина, «почему именно эти грабли». |
-| [02-feature-requests.md](02-feature-requests.md) | Народный вишлист по реакциям/комментам + вердикт «взять / потом / вне scope» и **дешёвые победы**. | Что делать дальше по фичам. |
-| [03-common-bugs-and-pitfalls.md](03-common-bugs-and-pitfalls.md) | 8 классов багов, неотъемлемых для X11-менеджера, + приоритизированный чек-лист превентивных мер. | Перед кодом **захвата буфера**. |
-| [04-image-clipboard.md](04-image-clipboard.md) | Всё про картинки: MIME/targets, память, fidelity, миниатюры, отдача по INCR, дизайн-скетч. | Перед **image support**. |
-| [05-x11-wayland-paste.md](05-x11-wayland-paste.md) | Вставка/фокус/XKB/selection/Wayland: валидация нашего XTEST+grab подхода и чек-лист. | По вставке и (не)поддержке Wayland. |
+| File | About | Who should read it first |
+|------|-------|--------------------------|
+| [01-release-history-lessons.md](01-release-history-lessons.md) | 14 recurring themes across 12 years of releases: what got fixed again and again = structural traps of the platform. | The big picture, "why exactly these pitfalls". |
+| [02-feature-requests.md](02-feature-requests.md) | The people's wishlist by reactions/comments + a "take / later / out of scope" verdict and **cheap wins**. | What to do next on features. |
+| [03-common-bugs-and-pitfalls.md](03-common-bugs-and-pitfalls.md) | 8 classes of bugs inherent to an X11 manager, + a prioritized checklist of preventive measures. | Before writing **clipboard capture** code. |
+| [04-image-clipboard.md](04-image-clipboard.md) | Everything about images: MIME/targets, memory, fidelity, thumbnails, serving via INCR, a design sketch. | Before **image support**. |
+| [05-x11-wayland-paste.md](05-x11-wayland-paste.md) | Paste/focus/XKB/selection/Wayland: validation of our XTEST+grab approach and a checklist. | On paste and (non-)support for Wayland. |
 
-Каждый файл ссылается на конкретные `#NNNN` — можно проследить до исходного тикета.
+Each file references concrete `#NNNN` — you can trace back to the original ticket.
 
-## Топ выводов: что упустили / на что заложиться
+## Top takeaways: what we missed / what to prepare for
 
-Сквозные приоритеты, всплывшие в нескольких файлах сразу. Порядок — по риску/пользе.
+Cross-cutting priorities that surfaced in several files at once. Ordered by
+risk/benefit.
 
-### Заложить до/вместе с настоящим захватом буфера
+### Prepare before/together with real clipboard capture
 
-1. **Не хранить секреты.** Как только мониторинг CLIPBOARD станет полноценным, мы,
-   как CopyQ до v8, начнём засасывать пароли из KeePassXC/Bitwarden. In-memory
-   спасает от утечки на диск, но пароль всё равно повиснет в RAM и покажется в
-   попапе. Проверять **наличие** target `x-kde-passwordManagerHint` (по факту
-   наличия, не содержимого — урок #2282) + чёрный список по `WM_CLASS`. Несколько
-   строк — закрывает целый класс утечек. → 03 §1, 01 §6, 02 п.6.
-2. **Приоритет UTF-8 при чтении.** `UTF8_STRING`/`text/plain;charset=utf-8` выше
-   `STRING`/`text/plain`, иначе mojibake на кириллице/умляутах — баг, который CopyQ
-   ловил годами. → 01 §7, 03 §3.
-3. **Чистка при сохранении.** Обрезать хвостовой `\0` (#681) и рассмотреть обрезку
-   хвостового `\n` (#2573) — особенно важно, раз вставляем в терминалы (лишний `\n`
-   сразу выполнит команду). → 03 §3.
-4. **Событийный захват без блокировки.** Не поллить в фоне; читать selection
-   асинхронно, с лимитом размера, не блокируя GTK-поток. Переинициализировать
-   подписку после suspend/resume (иначе детект «протухает» — #181/#1505). *Нюанс:
-   сейчас захват идёт через GTK (`owner-change` + `WaitForText`), и GTK берёт на
-   себя XFIXES/INCR — но `WaitForText` синхронный, так что лимит на размер и
-   неблокирование потока всё равно наши.* → 03 §2,4,5.
-5. **Не запрашивать `image/*` до поддержки картинок** и обернуть X-вызовы защитой
-   от X-ошибок — это разом снимает класс крэшей соседних приложений (Gimp/xclip
-   `BadWindow` при INCR больших картинок). → 03 §4, 04 §1.
+1. **Don't store secrets.** As soon as CLIPBOARD monitoring becomes full-featured,
+   we — like CopyQ before v8 — will start sucking in passwords from
+   KeePassXC/Bitwarden. In-memory saves us from a leak to disk, but the password
+   will still hang around in RAM and show up in the popup. Check for the **presence**
+   of the `x-kde-passwordManagerHint` target (by presence, not content — lesson
+   #2282) + a blacklist by `WM_CLASS`. A few lines — closes a whole class of leaks.
+   → 03 §1, 01 §6, 02 item 6.
+2. **UTF-8 priority when reading.** `UTF8_STRING`/`text/plain;charset=utf-8` above
+   `STRING`/`text/plain`, otherwise mojibake on Cyrillic/umlauts — a bug CopyQ chased
+   for years. → 01 §7, 03 §3.
+3. **Cleanup on save.** Trim a trailing `\0` (#681) and consider trimming a trailing
+   `\n` (#2573) — especially important since we paste into terminals (an extra `\n`
+   immediately runs the command). → 03 §3.
+4. **Event-driven capture without blocking.** Don't poll in the background; read the
+   selection asynchronously, with a size limit, without blocking the GTK thread.
+   Re-initialize the subscription after suspend/resume (otherwise detection goes
+   "stale" — #181/#1505). *Nuance: right now capture goes through GTK (`owner-change`
+   + `WaitForText`), and GTK takes on XFIXES/INCR — but `WaitForText` is synchronous,
+   so the size limit and not blocking the thread are still on us.* → 03 §2,4,5.
+5. **Don't request `image/*` until image support** and wrap X calls with protection
+   from X errors — this at once removes a class of crashes in neighboring apps
+   (Gimp/xclip `BadWindow` on INCR of large images). → 03 §4, 04 §1.
 
-### Вставка (доработать наш XTEST-путь)
+### Paste (refine our XTEST path)
 
-6. **Пауза press→release ~30–50 мс** на клавишу (дефолт CopyQ 50 мс; `0` **ломает
-   вставку в Chrome**). Не делать XSync между press и release. → 05, #1729.
-7. **Дождаться отпускания модификаторов** (зажатый Super от хоткея) + `XSync`/пауза
-   после ungrab перед FakeInput — иначе синтетический Ctrl+V смешается с Super или
-   уйдёт не в то окно. Самые долгие грабли CopyQ (v3.9→v4.0→v10). → 03 §6, 05.
-8. **Мапа «WM_CLASS → комбинация», а не булев «терминал».** Ctrl+Shift+V для
-   VTE/kitty/alacritty; **Shift+Insert** для xterm/urxvt; Ctrl+V — дефолт.
-   Универсального шортката вставки не существует (валидировано #2557/#3196). → 05.
-9. **Сверять активное окно** (`_NET_ACTIVE_WINDOW`, снятое при `--show`) перед
-   вставкой — не вставить в чужое окно. → 05.
+6. **A press→release pause of ~30–50 ms** per key (CopyQ default is 50 ms; `0`
+   **breaks paste in Chrome**). Don't XSync between press and release. → 05, #1729.
+7. **Wait for the modifiers to be released** (the held Super from the hotkey) +
+   `XSync`/pause after ungrab before FakeInput — otherwise the synthetic Ctrl+V mixes
+   with Super or goes to the wrong window. CopyQ's longest-running pitfall
+   (v3.9→v4.0→v10). → 03 §6, 05.
+8. **A "WM_CLASS → combination" map, not a boolean "terminal".** Ctrl+Shift+V for
+   VTE/kitty/alacritty; **Shift+Insert** for xterm/urxvt; Ctrl+V — the default. There
+   is no universal paste shortcut (validated by #2557/#3196). → 05.
+9. **Verify the active window** (`_NET_ACTIVE_WINDOW`, captured at `--show`) before
+   pasting — don't paste into the wrong window. → 05.
 
-### Позиционирование попапа
+### Popup positioning
 
-10. **Считать позицию по RandR CRTC под курсором, не по `_NET_WORKAREA`** (он один
-    на весь desktop → мусор на вторичных мониторах, #3608). Клампить попап в
-    видимую область именно того монитора; учитывать отрицательные координаты левого
-    монитора и нижнюю кромку. → 01 §8, 05.
+10. **Compute the position by the RandR CRTC under the cursor, not by
+    `_NET_WORKAREA`** (there's one per desktop → garbage on secondary monitors,
+    #3608). Clamp the popup to the visible area of exactly that monitor; account for
+    negative coordinates of a left monitor and the bottom edge. → 01 §8, 05.
 
-### Дешёвые фичи, которые мы зря не сделали
+### Cheap features we foolishly skipped
 
-11. **Поиск-по-набору** (search-as-you-type) — самое востребованное и почти
-    бесплатное: клавиши мы и так читаем поллингом, нужна строка-фильтр. **Цифры
-    `1`–`9`** для мгновенной вставки N-й записи. **Дедуп** «новое == верхнему».
-    **`max-entries` cap**. **Pin/favorites** + **clear-all**. Всё ложится на
-    in-memory список без диска. → 02 «Дешёвые победы».
+11. **Search-as-you-type** — the most in-demand and nearly free: we read keys by
+    polling anyway, we just need a filter string. **Digits `1`–`9`** for instant
+    paste of the Nth entry. **Dedup** "new == top". **A `max-entries` cap**.
+    **Pin/favorites** + **clear-all**. All fits on the in-memory list without disk.
+    → 02 "Cheap wins".
 
-## Картинки — держать перед глазами (скоро делаем)
+## Images — keep in view (coming soon)
 
-Отдельный конспект — [04](04-image-clipboard.md). Самое важное, чтобы не повторить
-боль CopyQ:
+A separate digest — [04](04-image-clipboard.md). The most important things so as not
+to repeat CopyQ's pain:
 
-- **Хранить оригинальные байты того target, что дал источник; не переконвертировать**
-  (JPEG молча стал BMP — #2185; потеря alpha из-за BMP выше PNG — #40). Приоритет
-  `image/png` > svg > jpeg > tiff/bmp/gif. Декодировать — **только для миниатюры**.
-- **Память — риск №1** (мы in-memory, упрёмся первыми: CopyQ доходил до 1 ГБ+):
-  сжатые оригиналы, ленивый рендер миниатюр, cap на размер захвата (24–32 MiB) и
-  на суммарную image-историю (LRU).
-- **Дедуп по `sha256`** байтов; фиксированная высота строк, миниатюра `contain`.
-- **Браузеры/Nautilus часто не кладут картинку** — только `text/html`/`text/plain`
-  со ссылкой или `text/uri-list`. Не рисовать фейковое превью; локальный uri-list
-  читать самим, remote-URL **не качать**. `data:image/*;base64` в тексте —
-  декодировать в реальную картинку (#973).
-- **Отдавать как selection-владелец**: заявлять в `TARGETS` только реально хранимые
-  форматы (#957 — over-advertising ломает чужие копирования); большие — по **INCR**
-  (#2233 режет на 64 КБ). В терминалы картинки не вставлять.
+- **Store the original bytes of the target the source provided; don't
+  re-convert** (JPEG silently became BMP — #2185; alpha loss due to BMP above PNG —
+  #40). Priority `image/png` > svg > jpeg > tiff/bmp/gif. Decode — **only for the
+  thumbnail**.
+- **Memory is risk #1** (we're in-memory, we'll hit it first: CopyQ reached 1 GB+):
+  compressed originals, lazy thumbnail rendering, a cap on capture size (24–32 MiB)
+  and on total image history (LRU).
+- **Dedup by `sha256`** of the bytes; fixed row height, `contain` thumbnail.
+- **Browsers/Nautilus often don't put an image** — only `text/html`/`text/plain` with
+  a link or `text/uri-list`. Don't draw a fake preview; read a local uri-list
+  ourselves, don't **download** a remote URL. `data:image/*;base64` in text — decode
+  into a real image (#973).
+- **Serve as the selection owner**: advertise in `TARGETS` only the formats actually
+  stored (#957 — over-advertising breaks other apps' copies); large ones — via
+  **INCR** (#2233 cuts at 64 KB). Don't paste images into terminals.
 
-## Что наш минимализм уже сделал правильно
+## What our minimalism already got right
 
-История CopyQ подтверждает: три вещи, от которых мы **сознательно отказались**, —
-его крупнейшие источники багов. Не поддаваться соблазну их добавить:
+CopyQ's history confirms: three things we **deliberately gave up** are its biggest
+sources of bugs. Don't give in to the temptation to add them:
 
-- **PRIMARY-selection sync** — доминирующая категория X11-багов CopyQ (гонки,
-  5-секундные фризы). Мы ведём только CLIPBOARD. → 01 §2, 05.
-- **Персистентность на диске** — блокировки, частичная порча файлов, атомарная
-  запись. Мы in-memory. → 01 §14.
-- **Скриптовый комбайн** (JS-движок, экшены, сеть) — половина релизов и огромная
-  поверхность багов. Мы — один список. → 01 «балласт».
+- **PRIMARY-selection sync** — the dominant category of CopyQ's X11 bugs (races,
+  5-second freezes). We track only CLIPBOARD. → 01 §2, 05.
+- **On-disk persistence** — locks, partial file corruption, atomic writes. We're
+  in-memory. → 01 §14.
+- **A scripting combine** (JS engine, actions, network) — half the releases and a
+  huge bug surface. We are a single list. → 01 "ballast".
 
-И наша **override-redirect + root-`GrabKeyboard`** архитектура структурно обходит
-целый класс focus-stealing-багов, с которым CopyQ из Qt **в принципе не может
-справиться** (#2960/#2993/#3325): мы не *просим* фокус, мы временно захватываем
-клавиатуру на уровне X, а целевое окно фокус не теряет. → 05.
+And our **override-redirect + root-`GrabKeyboard`** architecture structurally sidesteps
+a whole class of focus-stealing bugs that CopyQ, being Qt, **fundamentally cannot
+handle** (#2960/#2993/#3325): we don't *ask* for focus, we temporarily grab the
+keyboard at the X level, and the target window doesn't lose focus. → 05.
 
 ## Wayland
 
-Короткий вердикт: **оставаться X11-only — правильно.** GNOME/mutter не даёт ни
-data-control (чтение буфера), ни позиционирования попапа, ни XTEST-вставки, ни
-фокуса — «поддержка Wayland» у CopyQ там это XWayland-костыль. Реально возможен
-только wlroots-бэкенд (`ext-data-control-v1` + `zwlr-layer-shell` + `ydotool`),
-отдельным модулем, а не портированием X11-логики. Подробно — [05](05-x11-wayland-paste.md).
+Short verdict: **staying X11-only is the right call.** GNOME/mutter gives neither
+data-control (reading the clipboard), nor popup positioning, nor XTEST paste, nor
+focus — "Wayland support" in CopyQ there is an XWayland crutch. Realistically only a
+wlroots backend is possible (`ext-data-control-v1` + `zwlr-layer-shell` + `ydotool`),
+as a separate module, not by porting X11 logic. Details — [05](05-x11-wayland-paste.md).

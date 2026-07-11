@@ -1,6 +1,6 @@
 name: CI
 
-# Проверка сборки на пуш в main и на PR.
+# Build check on push to main and on PRs.
 on:
   push:
     branches: [main]
@@ -23,7 +23,7 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
 
-      # Линтер после установки libgtk-3-dev: cgo-тайпчек требует заголовков GTK.
+      # Linter after installing libgtk-3-dev: the cgo typecheck needs the GTK headers.
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:

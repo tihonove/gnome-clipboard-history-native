@@ -1,14 +1,14 @@
 //go:build linux
 
-// Package uinput — инъекция клавиш через собственное виртуальное клавиатурное
-// устройство /dev/uinput. Используется ТОЛЬКО на Wayland-бэкенде: под нативным
-// Wayland XTEST не действует, а kernel-level ввод через uinput доходит и до
-// нативных Wayland-окон, и до XWayland, и до консоли.
+// Package uinput — key injection through our own virtual keyboard device
+// /dev/uinput. Used ONLY on the Wayland backend: under native Wayland XTEST
+// doesn't work, while kernel-level input via uinput reaches native Wayland
+// windows, XWayland, and the console alike.
 //
-// Устройство создаём один раз при старте демона (Init) и переиспользуем на
-// каждую вставку — это убирает латентность создания и гонку «udev/libinput ещё не
-// подхватил устройство» (ровно поэтому у ydotool демон долгоживущий). Требует прав
-// на запись в /dev/uinput (иначе udev-правило).
+// We create the device once at daemon startup (Init) and reuse it for
+// every paste — this removes creation latency and the "udev/libinput hasn't
+// picked up the device yet" race (exactly why ydotool keeps a long-lived daemon). Requires
+// write access to /dev/uinput (otherwise a udev rule).
 package uinput
 
 import (
@@ -23,8 +23,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Константы ABI ядра (linux/uinput.h, input-event-codes.h) — стабильны, задаём сами,
-// т.к. x/sys/unix их не всегда экспортирует.
+// Kernel ABI constants (linux/uinput.h, input-event-codes.h) — stable, we define them
+// ourselves since x/sys/unix doesn't always export them.
 const (
 	evSyn     = 0x00
 	evKey     = 0x01
@@ -42,17 +42,17 @@ const (
 	uiDevDestroy = 0x5502     // UI_DEV_DESTROY
 )
 
-// DevPath — путь к устройству ядра для инъекции ввода.
+// DevPath — path to the kernel device for input injection.
 const DevPath = "/dev/uinput"
 
 var uinputFile *os.File
 
-// HasAccess сообщает, есть ли право записи в /dev/uinput (узел существует и W_OK).
-// false также если модуль uinput не загружен (узла нет) — это тоже трактуем как
-// «нужна настройка» (см. gnome-clipboard-history-native --setup-input).
+// HasAccess reports whether we have write access to /dev/uinput (node exists and W_OK).
+// Also false if the uinput module isn't loaded (no node) — we treat that too as
+// "setup needed" (see gnome-clipboard-history-native --setup-input).
 func HasAccess() bool { return unix.Access(DevPath, unix.W_OK) == nil }
 
-// uinputUserDev — struct uinput_user_dev из linux/uinput.h (legacy-путь создания).
+// uinputUserDev — struct uinput_user_dev from linux/uinput.h (legacy creation path).
 type uinputUserDev struct {
 	Name         [80]byte
 	ID           struct{ Bustype, Vendor, Product, Version uint16 }
@@ -63,7 +63,7 @@ type uinputUserDev struct {
 	Absflat      [64]int32
 }
 
-// Init открывает /dev/uinput, регистрирует нужные клавиши и создаёт устройство.
+// Init opens /dev/uinput, registers the needed keys, and creates the device.
 func Init() error {
 	f, err := os.OpenFile(DevPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -71,13 +71,13 @@ func Init() error {
 	}
 	fd := int(f.Fd())
 
-	// какие события/клавиши устройство умеет
+	// which events/keys the device supports
 	if err := unix.IoctlSetInt(fd, uiSetEvbit, evKey); err != nil {
 		f.Close()
 		return fmt.Errorf("UI_SET_EVBIT: %w", err)
 	}
 	for _, k := range []int{
-		keyLeftShift, keyInsert, // Shift+Insert — основной способ
+		keyLeftShift, keyInsert, // Shift+Insert — the primary method
 		keyLeftCtrl, keyV, // Ctrl+V — fallback (GCHN_PASTE=ctrlv)
 	} {
 		if err := unix.IoctlSetInt(fd, uiSetKeybit, k); err != nil {
@@ -101,14 +101,14 @@ func Init() error {
 		return fmt.Errorf("UI_DEV_CREATE: %w", err)
 	}
 
-	// дать udev/компоситору подхватить новое устройство
+	// let udev/the compositor pick up the new device
 	time.Sleep(200 * time.Millisecond)
 	uinputFile = f
-	log.Println("uinput: виртуальная клавиатура создана")
+	log.Println("uinput: virtual keyboard created")
 	return nil
 }
 
-// Close уничтожает виртуальное устройство. No-op, если Init не вызывался (X11).
+// Close destroys the virtual device. No-op if Init was never called (X11).
 func Close() {
 	if uinputFile == nil {
 		return
@@ -129,7 +129,7 @@ type inputEvent struct {
 
 func emit(typ, code uint16, value int32) error {
 	if uinputFile == nil {
-		return fmt.Errorf("uinput не инициализирован")
+		return fmt.Errorf("uinput not initialized")
 	}
 	ev := inputEvent{Type: typ, Code: code, Value: value}
 	b := (*[unsafe.Sizeof(ev)]byte)(unsafe.Pointer(&ev))[:]
@@ -139,11 +139,11 @@ func emit(typ, code uint16, value int32) error {
 
 func syn() error { return emit(evSyn, synReport, 0) }
 
-// combo эмитит модификатор+клавишу: press mod, press key, syn; release key, release mod, syn.
-// Ошибки записи игнорируем сознательно: середина комбинации — откатывать нечего.
+// combo emits modifier+key: press mod, press key, syn; release key, release mod, syn.
+// Write errors are deliberately ignored: mid-combo — there's nothing to roll back.
 func combo(mod, key uint16) {
 	if uinputFile == nil {
-		log.Println("uinput недоступен — вставка пропущена")
+		log.Println("uinput unavailable — paste skipped")
 		return
 	}
 	_ = emit(evKey, mod, 1)
@@ -157,11 +157,11 @@ func combo(mod, key uint16) {
 func injectShiftInsert() { combo(keyLeftShift, keyInsert) }
 func injectCtrlV()       { combo(keyLeftCtrl, keyV) }
 
-// InjectPaste выбирает способ вставки на Wayland. По умолчанию Shift+Insert —
-// раскладко-независимо и работает и в терминалах, и в GUI. ВАЖНО: GUI-поля по нему
-// берут CLIPBOARD, а VTE-терминалы — PRIMARY, поэтому вызывающая сторона
-// (finishWayland) кладёт выбранную запись в ОБА селекшна. Скрытый env-override
-// GCHN_PASTE=ctrlv — на случай приложения, не понимающего Shift+Insert.
+// InjectPaste chooses the paste method on Wayland. By default Shift+Insert —
+// layout-independent and works in both terminals and GUIs. IMPORTANT: GUI fields take
+// CLIPBOARD via it, while VTE terminals take PRIMARY, so the caller
+// (finishWayland) puts the selected entry into BOTH selections. Hidden env override
+// GCHN_PASTE=ctrlv — for an app that doesn't understand Shift+Insert.
 func InjectPaste() {
 	if os.Getenv("GCHN_PASTE") == "ctrlv" {
 		injectCtrlV()
@@ -170,7 +170,7 @@ func InjectPaste() {
 	injectShiftInsert()
 }
 
-// InjectPasteCtrlV — принудительно Ctrl+V. Нужно для вставки картинки: Shift+Insert
-// в терминалах берёт PRIMARY (картинку туда не кладём), а GUI-приложения, куда
-// картинка и вставляется, понимают Ctrl+V.
+// InjectPasteCtrlV — force Ctrl+V. Needed for pasting an image: Shift+Insert
+// in terminals takes PRIMARY (we don't put the image there), while GUI applications, where
+// the image is actually pasted, understand Ctrl+V.
 func InjectPasteCtrlV() { injectCtrlV() }

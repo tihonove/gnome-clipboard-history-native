@@ -1,29 +1,28 @@
-# Поддержка изображений в буфере обмена (gnome-clipboard-history-native)
+# Image support in the clipboard (gnome-clipboard-history-native)
 
-## Зачем это нужно
+## Why this is needed
 
-Сейчас gnome-clipboard-history-native — text-only и in-memory. Следующий шаг — захватывать копирование
-картинок (скриншоты из GNOME Screenshot/Spectacle/Flameshot, «Копировать
-изображение» из браузеров, копирование файлов из Nautilus), показывать
-миниатюру в popup-списке и вставлять картинку обратно в целевое приложение
-через XTEST + владение selection.
+Right now gnome-clipboard-history-native is text-only and in-memory. The next step is to capture copying
+of images (screenshots from GNOME Screenshot/Spectacle/Flameshot, "Copy image" from
+browsers, copying files from Nautilus), show a thumbnail in the popup list, and paste
+the image back into the target application via XTEST + selection ownership.
 
-Изображения — это то место, где CopyQ собрал больше всего боли: подвисания на
-больших картинках, разрушение прозрачности, конвертация в BMP при повторной
-вставке, миниатюры-дубликаты, «картинки из браузера сохраняются как текст».
-Этот документ — конспект того, на что CopyQ наступил, чтобы мы не повторяли
-его ошибки ещё до того, как начнём писать код.
+Images are where CopyQ accumulated the most pain: hangs on large images, destruction of
+transparency, conversion to BMP on re-paste, duplicate thumbnails, "images from the
+browser saved as text". This document is a digest of what CopyQ stepped on, so that we
+don't repeat its mistakes before we even start writing code.
 
-Источник: issues из репозитория `hluk/CopyQ` (номера #NNNN приведены дословно).
+Source: issues from the `hluk/CopyQ` repository (the `#NNNN` numbers are cited
+verbatim).
 
 ---
 
-## MIME/targets на X11
+## MIME/targets on X11
 
-### Что реально лежит в буфере, когда копируют картинку
+### What actually sits in the clipboard when an image is copied
 
-Полный список TARGETS, который CopyQ увидел при копировании картинки в X11
-(из #973, вывод `copyq clipboard '?'`):
+The full TARGETS list CopyQ saw when copying an image on X11
+(from #973, output of `copyq clipboard '?'`):
 
 ```
 image/png
@@ -31,321 +30,317 @@ image/bmp   image/x-bmp   image/x-MS-bmp
 image/jpeg
 image/tiff
 image/x-icon  image/x-ico  image/x-win-bitmap  image/vnd.microsoft.icon
-application/x-qt-image   (это Qt-специфичное, нам не нужно)
+application/x-qt-image   (this is Qt-specific, we don't need it)
 text/html
 text/uri-list
 text/plain / COMPOUND_TEXT / UTF8_STRING
 ```
 
-Ключевой вывод: приложение-источник обычно **предлагает несколько форматов
-одновременно**. Источник картинки как selection owner конвертирует данные
-лениво, по запросу конкретного target. Мы (как получатель) выбираем, какой
-target запросить и сохранить.
+Key takeaway: the source application usually **offers several formats
+simultaneously**. The image source, as selection owner, converts the data lazily, on
+request for a specific target. We (as the recipient) choose which target to request and
+store.
 
-### Приоритет форматов для хранения/рендера
+### Format priority for storage/render
 
-CopyQ рендерит превью, перебирая форматы в фиксированном порядке. Изначально
-это было `SVG, BMP, PNG, JPEG, GIF`, и из-за BMP выше PNG **терялась
-прозрачность** (#40). После фикса PNG подняли выше BMP.
+CopyQ renders the preview by iterating over formats in a fixed order. Initially this was
+`SVG, BMP, PNG, JPEG, GIF`, and because BMP was above PNG, **transparency was lost**
+(#40). After the fix, PNG was raised above BMP.
 
-Рекомендуемый порядок предпочтения для gnome-clipboard-history-native (что запрашивать/хранить, если
-доступно несколько):
+Recommended preference order for gnome-clipboard-history-native (what to request/store when several are
+available):
 
-1. `image/png` — приоритет №1. Lossless, поддерживает alpha, все приложения
-   и GTK его читают/пишут нативно. Это наш основной формат.
-2. `image/svg+xml` — хранить, только если PNG нет. SVG может быть как выше по
-   качеству (вектор), так и ниже (#2961: у человека SVG из Word был хуже PNG).
-   Рендер SVG сложнее; CopyQ по умолчанию предпочитает PNG именно из-за
-   простоты рендера.
-3. `image/jpeg` — если источник дал только JPEG, хранить **оригинальные
-   байты JPEG** (см. #2185 ниже — не переконвертировать в PNG/BMP молча).
-4. `image/tiff`, `image/bmp`, `image/gif` — сохранять оригинальные байты как
-   fallback, если ничего лучше нет.
+1. `image/png` — priority #1. Lossless, supports alpha, all applications and GTK
+   read/write it natively. This is our primary format.
+2. `image/svg+xml` — store only if PNG is absent. SVG can be either higher quality
+   (vector) or lower (#2961: someone's SVG from Word was worse than PNG). Rendering SVG
+   is harder; CopyQ prefers PNG by default precisely for the simplicity of rendering.
+3. `image/jpeg` — if the source gave only JPEG, store the **original JPEG bytes** (see
+   #2185 below — don't silently re-encode to PNG/BMP).
+4. `image/tiff`, `image/bmp`, `image/gif` — store the original bytes as a fallback if
+   there's nothing better.
 
-Иконочные форматы (`image/x-icon`, `image/vnd.microsoft.icon` и пр.)
-игнорируем — это шум от source-приложения.
+Icon formats (`image/x-icon`, `image/vnd.microsoft.icon`, etc.) we ignore — that's
+noise from the source application.
 
-### Рекомендованная стратегия хранения
+### Recommended storage strategy
 
-Храним **оригинальные байты ровно того target, что отдал источник**, плюс имя
-самого target. Не нормализуем в один внутренний формат агрессивно. Причина —
-раздел про fidelity ниже (#2185, #2961, #2961-SVG). Отдельно держим
-декодированный/уменьшенный QPixmap-аналог (в нашем случае `GdkPixbuf`) **только
-для миниатюры**, не для отдачи в selection.
+We store the **original bytes of exactly the target the source gave**, plus the name of
+the target itself. We don't aggressively normalize into a single internal format. The
+reason is the fidelity section below (#2185, #2961, #2961-SVG). Separately we keep a
+decoded/downscaled QPixmap-analog (in our case a `GdkPixbuf`) **only for the
+thumbnail**, not for handing to the selection.
 
-Минимальная запись об изображении:
+Minimal image record:
 
 ```
 {
-  targets: {                     // что реально сохранили из источника
-    "image/png":  <bytes>,       // основной; может быть единственным
-    "image/svg+xml": <bytes>,    // опционально
+  targets: {                     // what we actually stored from the source
+    "image/png":  <bytes>,       // primary; may be the only one
+    "image/svg+xml": <bytes>,    // optional
     ...
   },
-  primary_target: "image/png",   // что рендерим и что отдаём по умолчанию
-  thumb: <GdkPixbuf, уже уменьшенный>,
-  hash:  <sha256 от primary bytes>,
+  primary_target: "image/png",   // what we render and what we hand over by default
+  thumb: <GdkPixbuf, already downscaled>,
+  hash:  <sha256 of the primary bytes>,
   w, h, byte_size
 }
 ```
 
-### Про text/uri-list и x-special/gnome-copied-files
+### About text/uri-list and x-special/gnome-copied-files
 
-Когда картинку копируют **в файловом менеджере** (Nautilus) или из браузера
-через «Copy image» в chromium-подобных, в буфере **нет image-данных** — там
-только:
+When an image is copied **in a file manager** (Nautilus) or from a browser via "Copy
+image" in chromium-like browsers, there are **no image data** in the clipboard — there's
+only:
 
 - `text/uri-list` + `x-special/gnome-copied-files` (Nautilus: `copy\nfile:///...`)
-- либо `text/html` с `<img src="http...">` и `text/plain` со ссылкой.
+- or `text/html` with `<img src="http...">` and `text/plain` with the link.
 
-CopyQ на этом обжёгся многократно (#1100, #2046, #2084, #2936, #3369, #2858,
-#1591): пользователи ждут превью, а в буфере лежит только путь/URL, и получают
-пустой элемент или строку текста. См. раздел про fidelity — это самая частая
-жалоба.
+CopyQ got burned on this many times (#1100, #2046, #2084, #2936, #3369, #2858, #1591):
+users expect a preview, but only a path/URL sits in the clipboard, and they get an empty
+element or a line of text. See the fidelity section — this is the most frequent
+complaint.
 
-Решение для gnome-clipboard-history-native: uri-list на локальный файл-картинку мы можем **сами
-прочитать с диска** и отрендерить миниатюру (это локальный файл, не сеть — без
-security/perf-проблем, в отличие от `<img src=http>`). Remote-URL из HTML **не
-скачиваем** (CopyQ принципиально отказался — #1591, #2084 — из-за безопасности
-и производительности; согласны).
-
----
-
-## Проблемы CopyQ и как их избежать
-
-### 1. Память и производительность на больших картинках
-
-- **#1070 «Can't pipe large images into xclip while CopyQ is running»** (23
-  комментария). Пока CopyQ (как clipboard-менеджер) висит и лезет в буфер,
-  `xclip -target image/png < big.png` падает с `BadWindow (X_ChangeProperty)`.
-  Воспроизводилось даже с **выключенным** плагином Images и даже у KolourPaint
-  — т.е. корень в том, что любой listener, дёргающий selection во время INCR-
-  передачи большой картинки, ломает передачу source-приложению. Ронял GIMP.
-  → gnome-clipboard-history-native-рекомендация: при владельце selection, который отдаёт большие
-  данные, **не запрашивать данные синхронно в обработчике смены владельца**.
-  Читать TARGETS сразу, но сами байты картинки тянуть отложенно/асинхронно и с
-  собственным окном-приёмником, аккуратно поддерживая INCR (передача крупных
-  свойств кусками). Никогда не блокировать X-loop на время выкачивания.
-
-- **#2523 «Large images are not saved»** + **#2377 «extremely lag …
-  hasClipboardFormat('image/png')»** + логи `ELAPSED 576 ms accessing
-  imageData`, `Retrying to obtain clipboard`. Большие/высокоразрешённые
-  скриншоты (Spectacle) делают простой запрос формата медленным; при 100 MiB
-  CopyQ фактически залипал, и параллельное копирование вешало приложение
-  (#2523 коммент).
-  → Ставим **жёсткий лимит на размер** захватываемой картинки (напр. 24–32 MiB
-  на один target; конфигурируемо). Если больше — не тянем байты, показываем
-  элемент-плейсхолдер «крупное изображение, не сохранено» либо просто пропускаем.
-  Выкачивание — в отдельной горутине с таймаутом; UI popup **никогда** не ждёт.
-  В #2377 всплыла спецпроблема: Spectacle дописывает мусор **после IEND** в
-  PNG — не полагаться на «размер = размер PNG», читать сколько отдают.
-
-- **#3247 / #3375 «High memory usage»**. У CopyQ RAM растёт до 1 GB+ за дни
-  простоя; хранилище картинок в памяти и Qt-объекты не освобождаются.
-  Показательно: в #3375 «Hide tabs» мгновенно сбрасывал память с 167 MB до
-  25 MB — т.е. виджеты/декодированные превью висели в памяти для невидимых
-  элементов.
-  → У нас всё in-memory, и мы **точно** упрёмся в это первыми, если хранить
-  полноразмерные декодированные картинки. Правила: (а) декодировать в пиксели
-  только миниатюру, оригинальные байты держать сжатыми (PNG/JPEG как есть);
-  (б) общий cap на суммарный объём image-истории (напр. N МБ), с вытеснением
-  самых старых; (в) не создавать GTK-виджеты/`GdkPixbuf` для элементов, которых
-  сейчас нет на экране (ленивый рендер в списке).
-
-### 2. Точность формата, прозрачность, конвертация
-
-- **#40 «Alpha channel missing from previews»** — из-за приоритета BMP над PNG
-  терялась прозрачность. → У нас PNG всегда выше BMP; миниатюру рендерим с
-  alpha (`GdkPixbuf` с альфой), фон под превью — шахматка/прозрачный, не
-  заливать белым.
-
-- **#2185 «Keeping images as JPEG (not BMP)»** (закрыт). Скопировали JPEG →
-  вставился JPEG. Но после того как элемент «прокрутили» через историю и
-  вернули в буфер, CopyQ отдавал уже **BMP** вместо JPEG. Т.е. при повторной
-  выдаче он ре-кодировал из внутреннего QImage.
-  → Правило gnome-clipboard-history-native: **отдаём в selection ровно те байты и тот target, что
-  сохранили**. Никакой молчаливой переконвертации JPEG→BMP/PNG при повторной
-  вставке. Внутреннее декодирование — только для миниатюры.
-
-- **#2961 «Image quality loss»** (Word: PNG высокого качества + SVG низкого).
-  CopyQ по умолчанию предпочёл рендерить/отдавать один формат, а система —
-  другой, и качество отличалось от нативного Ctrl+V. Ответ автора важен: «CopyQ
-  ведёт себя не как системный буфер, и из-за этого будут ещё несовместимости».
-  → Мы должны как можно точнее воспроизводить поведение системного буфера:
-  сохранять **все** значимые image-таргеты, что дал источник, и по запросу
-  отдавать именно запрошенный, а не «наш любимый».
-
-- **#973 «base64 string item» / #2084 «Images stored as text from browsers»**
-  (48 комментов, open). Из luakit/webkit картинка приходит как
-  `data:image/png;base64,...` в `text/plain`, из chromium/firefox — как
-  `text/html`/`text/plain` со ссылкой, вообще без image-target. У CopyQ есть
-  предопределённый воркэраунд-команда: распознать `data:...;base64,` и
-  `setData(format, fromBase64(...))`.
-  → gnome-clipboard-history-native может встроить это нативно: если `text/plain` — это `data:image/*;
-  base64,`, декодировать в реальный image-target и хранить как картинку. Дёшево
-  и локально.
-
-- **#2037 «pasting image/gif into browser doesn't work»**, **#2456
-  «Copy/Paste multiple images»**. GIF и множественные картинки — плохо
-  поддержаны везде. Для нескольких картинок вообще нет стандартного X11-таргета
-  (Ditto на Windows склеивает в один большой bitmap — не наш путь).
-  → gnome-clipboard-history-native: одна картинка = один элемент. Анимированный GIF храним как байты
-  и отдаём как `image/gif`, но миниатюру рисуем по первому кадру; не обещаем
-  анимацию. «Вставить несколько картинок разом» — не поддерживаем (в крайнем
-  случае — последовательная вставка по одной, как воркэраунд CopyQ Paste All).
-
-### 3. Отдача картинки обратно (paste-back, negotiation)
-
-- **#957 «Emacs cannot copy text if image in clipboard»**. Пока владелец
-  selection (CopyQ) держит image-item, Emacs с `save-interprogram-paste-before-
-  kill` не мог скопировать текст: `Selection owner couldn't convert: STRING`.
-  → Владелец selection **обязан корректно отвечать на конвертацию всех
-  заявленных таргетов**, включая `TARGETS`, `MULTIPLE`, `TIMESTAMP`, и на
-  запрос неподдерживаемого — отвечать отказом штатно (пустой/`None`), не молча.
-  Урок: не заявляй target, который не сможешь отдать.
-
-- **#2185 / #2961** (см. выше) — negotiation: приложение просит формат,
-  которого мы не сохранили. Мы заявляем в `TARGETS` **только те форматы, что
-  реально держим**. Если у нас только PNG — заявляем только PNG (+ производные,
-  которые готовы синтезировать по запросу, напр. BMP из PNG — но тогда делаем
-  это честно и по требованию, а не подменяя основной).
-
-- **INCR при отдаче**: большие картинки надо отдавать чанками (INCR-протокол
-  X11) — иначе `X_ChangeProperty` на мегабайтном property падает (#1070).
-  Наш daemon-владелец должен уметь и **принимать**, и **отдавать** по INCR.
-
-### 4. Миниатюры и UI
-
-- **#3129 «Inconsistent Image Preview Sizes and Duplicated Entries»**. Два
-  бага сразу: (а) превью картинки из файлового менеджера игнорирует
-  «Maximum width/height» → гигантские миниатюры ломают вёрстку списка; (б)
-  один скриншот создаёт **два элемента** (данные + отдельное превью).
-  → У нас: единый фиксированный размер миниатюры в списке (масштабируем с
-  сохранением пропорций, `GdkPixbuf.scale_simple`/`gdk_pixbuf_new_from_stream_at_scale`).
-  Один copy-эвент = один элемент истории (см. дедуп ниже), никаких дублей.
-
-- **#3499 «thumbnail toggle» / #3577 «Scale images to fit preview area»**.
-  Люди хотят одинаковую высоту строк (как в Ditto) и превью, вписанное в
-  область, а не зум в 100%.
-  → Сразу делаем: строки списка одинаковой высоты, миниатюра `contain` (по
-  большей стороне), крупное превью тоже вписываем в панель, не показываем кроп
-  центра большого изображения.
-
-- **#252 «Save to file» (45 комм.) / #1616 «save as jpg» / #2840 «Resize and
-  paste»**. Массовый спрос: сохранить картинку из истории в файл, вставить с
-  ресайзом. У CopyQ это только через пользовательские скрипты.
-  → Для gnome-clipboard-history-native «Сохранить изображение как…» из контекстного меню popup —
-  дешёвая и очень желанная фича. Ресайз при вставке — опционально, позже.
-
-### 5. Специфика приложений
-
-- **Браузеры (Chrome/Firefox/Edge/Vivaldi/Brave)** — #2084, #2046, #1591,
-  #1100, #2936: «Copy image» часто кладёт только `text/html`/`text/plain`
-  (ссылку), иногда без image-target вообще. Firefox чаще даёт нормальный
-  `image/png`, chromium-подобные — чаще только HTML. `.webp` из браузера
-  вообще может не рендериться (#2936). → Не рассчитывать, что «Copy image» = в
-  буфере есть картинка. Проверять наличие реального image-target; если нет —
-  элемент как текст/ссылка, без фейкового превью.
-- **GNOME Screenshot / Spectacle / Flameshot** — дают нормальный `image/png`,
-  это наш «хороший» кейс. Но Spectacle может дописывать данные после IEND
-  (#2377) и делать очень большие PNG (лаги).
-- **GIMP** — падал из-за INCR-конфликта (#1070). Аккуратность с большими
-  передачами критична.
-- **LibreOffice / MS Office / PowerPoint** — #2961, #3555, #2068: кладут
-  несколько форматов (PNG + SVG + свои), выбор «не того» ломает качество или
-  вставляет не то. Отдаём запрошенный формат, не свой любимый.
-- **Nautilus (copy файла-картинки)** — `text/uri-list` +
-  `x-special/gnome-copied-files`, image-данных нет. Локальный файл читаем сами
-  для превью.
+Solution for gnome-clipboard-history-native: a uri-list to a local image file we can **read from disk
+ourselves** and render a thumbnail (it's a local file, not the network — without
+security/perf problems, unlike `<img src=http>`). A remote URL from HTML we **do not
+download** (CopyQ refused on principle — #1591, #2084 — due to security and performance;
+we agree).
 
 ---
 
-## Рекомендации для реализации в gnome-clipboard-history-native
+## CopyQ's problems and how to avoid them
 
-### Что захватывать
+### 1. Memory and performance on large images
 
-При смене владельца CLIPBOARD запрашиваем `TARGETS`. Далее по приоритету:
+- **#1070 "Can't pipe large images into xclip while CopyQ is running"** (23
+  comments). While CopyQ (as a clipboard manager) is running and reaching into the
+  clipboard, `xclip -target image/png < big.png` crashes with `BadWindow
+  (X_ChangeProperty)`. It reproduced even with the Images plugin **disabled** and even
+  with KolourPaint — i.e. the root cause is that any listener that pulls at the selection
+  during the INCR transfer of a large image breaks the transfer to the source
+  application. It crashed GIMP.
+  → gnome-clipboard-history-native recommendation: when the selection owner is handing over large data,
+  **don't request the data synchronously in the owner-change handler**. Read TARGETS
+  immediately, but pull the image bytes themselves lazily/asynchronously and with our
+  own receiver window, carefully supporting INCR (transferring large properties in
+  chunks). Never block the X loop for the duration of the download.
 
-1. Есть `image/png` / `image/svg+xml` / `image/jpeg` / `image/tiff` / `image/bmp`
-   / `image/gif` → это **картинка**. Тянем байты выбранного primary-target
-   (PNG предпочтителен) асинхронно, с лимитом размера и поддержкой INCR.
-2. Нет image-таргета, но `text/plain` = `data:image/*;base64,...` → декодируем
-   в image-элемент (#973).
-3. Нет image-таргета, но `text/uri-list`/`x-special/gnome-copied-files`
-   указывает на **локальный** файл-картинку → читаем файл с диска для превью;
-   при вставке отдаём uri-list как есть (это операция «вставить файл», не
-   «вставить пиксели»).
-4. Только `text/html`/`text/plain` со ссылкой на remote-картинку → это **текст**,
-   не картинка. Remote не качаем (#1591, #2084).
+- **#2523 "Large images are not saved"** + **#2377 "extremely lag …
+  hasClipboardFormat('image/png')"** + logs `ELAPSED 576 ms accessing imageData`,
+  `Retrying to obtain clipboard`. Large/high-resolution screenshots (Spectacle) make a
+  simple format query slow; at 100 MiB CopyQ effectively stuck, and a parallel copy hung
+  the application (#2523 comment).
+  → We set a **hard size limit** on the captured image (e.g. 24–32 MiB per target;
+  configurable). If it's larger — we don't pull the bytes, we show a placeholder element
+  "large image, not saved" or simply skip it. The download runs in a separate goroutine
+  with a timeout; the popup UI **never** waits. In #2377 a special problem surfaced:
+  Spectacle appends garbage **after IEND** in the PNG — don't rely on "size = PNG size",
+  read however much is handed over.
 
-### Ключ/дедуп изображений
+- **#3247 / #3375 "High memory usage"**. CopyQ's RAM grows to 1 GB+ over days of idle;
+  the in-memory image storage and Qt objects are not freed. Telling: in #3375 "Hide
+  tabs" instantly dropped memory from 167 MB to 25 MB — i.e. widgets/decoded previews
+  hung in memory for invisible elements.
+  → We're entirely in-memory, and we'll **definitely** hit this first if we store
+  full-size decoded images. Rules: (a) decode into pixels only the thumbnail, keep the
+  original bytes compressed (PNG/JPEG as-is); (b) an overall cap on the total volume of
+  the image history (e.g. N MB), with eviction of the oldest; (c) don't create GTK
+  widgets/`GdkPixbuf` for elements that aren't currently on screen (lazy rendering in the
+  list).
 
-`hash = sha256(primary_target_bytes)`. Дедуп — по хешу: повторное копирование
-той же картинки не создаёт дубль (лечит «Duplicated Entries» #3129), а
-поднимает существующий элемент наверх. Хеш считаем от **сжатых** байтов (не от
-декодированных пикселей) — дёшево и стабильно.
+### 2. Format fidelity, transparency, conversion
 
-### Миниатюры в GTK
+- **#40 "Alpha channel missing from previews"** — transparency was lost due to the
+  priority of BMP over PNG. → For us, PNG is always above BMP; we render the thumbnail
+  with alpha (`GdkPixbuf` with alpha), the background under the preview is a
+  checkerboard/transparent, not filled white.
 
-- Декодируем прямо в уменьшенный размер:
+- **#2185 "Keeping images as JPEG (not BMP)"** (closed). Copied JPEG → pasted JPEG. But
+  after the element was "scrolled" through the history and returned to the clipboard,
+  CopyQ handed over **BMP** instead of JPEG. That is, on re-issue it re-encoded from the
+  internal QImage.
+  → gnome-clipboard-history-native rule: **we hand over to the selection exactly the bytes and the
+  target we stored**. No silent re-conversion JPEG→BMP/PNG on re-paste. Internal decoding
+  is only for the thumbnail.
+
+- **#2961 "Image quality loss"** (Word: high-quality PNG + low-quality SVG). CopyQ by
+  default preferred to render/hand over one format, while the system used another, and
+  the quality differed from the native Ctrl+V. The author's reply is important: "CopyQ
+  doesn't behave like the system clipboard, and because of that there will be more
+  incompatibilities."
+  → We should reproduce the system clipboard's behavior as closely as possible: store
+  **all** significant image targets the source gave, and on request hand over exactly the
+  requested one, not "our favorite".
+
+- **#973 "base64 string item" / #2084 "Images stored as text from browsers"** (48
+  comments, open). From luakit/webkit an image arrives as `data:image/png;base64,...` in
+  `text/plain`, from chromium/firefox — as `text/html`/`text/plain` with a link, with no
+  image target at all. CopyQ has a predefined workaround command: recognize
+  `data:...;base64,` and `setData(format, fromBase64(...))`.
+  → gnome-clipboard-history-native can build this in natively: if `text/plain` is a `data:image/*;
+  base64,`, decode into a real image target and store it as an image. Cheap and local.
+
+- **#2037 "pasting image/gif into browser doesn't work"**, **#2456 "Copy/Paste multiple
+  images"**. GIF and multiple images are poorly supported everywhere. For multiple images
+  there's no standard X11 target at all (Ditto on Windows glues them into one large
+  bitmap — not our path).
+  → gnome-clipboard-history-native: one image = one element. An animated GIF we store as bytes and hand
+  over as `image/gif`, but we draw the thumbnail from the first frame; we don't promise
+  animation. "Paste several images at once" — we don't support (at worst — sequential
+  pasting one at a time, like CopyQ's Paste All workaround).
+
+### 3. Handing the image back (paste-back, negotiation)
+
+- **#957 "Emacs cannot copy text if image in clipboard"**. While the selection owner
+  (CopyQ) holds an image item, Emacs with `save-interprogram-paste-before-kill` couldn't
+  copy text: `Selection owner couldn't convert: STRING`.
+  → The selection owner **must correctly answer conversion of all declared targets**,
+  including `TARGETS`, `MULTIPLE`, `TIMESTAMP`, and for a request of an unsupported one —
+  refuse in the standard way (empty/`None`), not silently. Lesson: don't declare a target
+  you can't hand over.
+
+- **#2185 / #2961** (see above) — negotiation: an application requests a format we didn't
+  store. We declare in `TARGETS` **only the formats we actually hold**. If we only have
+  PNG — we declare only PNG (+ derivatives we're ready to synthesize on request, e.g. BMP
+  from PNG — but then we do it honestly and on demand, not by substituting the primary).
+
+- **INCR on handoff**: large images must be handed over in chunks (X11's INCR protocol) —
+  otherwise `X_ChangeProperty` on a megabyte-sized property crashes (#1070). Our
+  daemon-owner must be able to both **receive** and **hand over** via INCR.
+
+### 4. Thumbnails and UI
+
+- **#3129 "Inconsistent Image Preview Sizes and Duplicated Entries"**. Two bugs at once:
+  (a) an image preview from the file manager ignores "Maximum width/height" → giant
+  thumbnails break the list layout; (b) a single screenshot creates **two elements**
+  (the data + a separate preview).
+  → For us: a single fixed thumbnail size in the list (we scale preserving aspect ratio,
+  `GdkPixbuf.scale_simple`/`gdk_pixbuf_new_from_stream_at_scale`). One copy event = one
+  history element (see dedup below), no duplicates.
+
+- **#3499 "thumbnail toggle" / #3577 "Scale images to fit preview area"**. People want
+  uniform row height (like in Ditto) and a preview fitted to the area, not a 100% zoom.
+  → We do it right away: list rows of uniform height, the thumbnail `contain` (by the
+  larger side), the large preview also fitted into the panel, we don't show a center crop
+  of a large image.
+
+- **#252 "Save to file" (45 comments) / #1616 "save as jpg" / #2840 "Resize and
+  paste"**. Mass demand: save an image from the history to a file, paste with a resize.
+  In CopyQ this is only via user scripts.
+  → For gnome-clipboard-history-native, "Save image as…" from the popup context menu is a cheap and
+  very desirable feature. Resize on paste — optional, later.
+
+### 5. Application specifics
+
+- **Browsers (Chrome/Firefox/Edge/Vivaldi/Brave)** — #2084, #2046, #1591, #1100, #2936:
+  "Copy image" often puts only `text/html`/`text/plain` (a link), sometimes without an
+  image target at all. Firefox more often gives a normal `image/png`, chromium-like ones
+  — more often only HTML. `.webp` from the browser may not render at all (#2936). → Don't
+  count on "Copy image" = there's an image in the clipboard. Check for the presence of a
+  real image target; if there's none — treat the element as text/link, without a fake
+  preview.
+- **GNOME Screenshot / Spectacle / Flameshot** — give a normal `image/png`, this is our
+  "good" case. But Spectacle may append data after IEND (#2377) and produce very large
+  PNGs (lags).
+- **GIMP** — crashed due to the INCR conflict (#1070). Care with large transfers is
+  critical.
+- **LibreOffice / MS Office / PowerPoint** — #2961, #3555, #2068: put several formats
+  (PNG + SVG + their own), choosing "the wrong one" breaks quality or pastes the wrong
+  thing. We hand over the requested format, not our favorite.
+- **Nautilus (copy of an image file)** — `text/uri-list` +
+  `x-special/gnome-copied-files`, no image data. A local file we read ourselves for the
+  preview.
+
+---
+
+## Recommendations for the implementation in gnome-clipboard-history-native
+
+### What to capture
+
+On a change of the CLIPBOARD owner we request `TARGETS`. Then by priority:
+
+1. There's `image/png` / `image/svg+xml` / `image/jpeg` / `image/tiff` / `image/bmp`
+   / `image/gif` → this is an **image**. We pull the bytes of the chosen primary target
+   (PNG preferred) asynchronously, with a size limit and INCR support.
+2. No image target, but `text/plain` = `data:image/*;base64,...` → we decode into an
+   image element (#973).
+3. No image target, but `text/uri-list`/`x-special/gnome-copied-files` points to a
+   **local** image file → we read the file from disk for the preview; on paste we hand
+   over the uri-list as-is (this is a "paste file" operation, not "paste pixels").
+4. Only `text/html`/`text/plain` with a link to a remote image → this is **text**, not
+   an image. We don't download remote content (#1591, #2084).
+
+### Image key/dedup
+
+`hash = sha256(primary_target_bytes)`. Dedup — by the hash: re-copying the same image
+doesn't create a duplicate (fixes "Duplicated Entries" #3129) but raises the existing
+element to the top. We compute the hash from the **compressed** bytes (not the decoded
+pixels) — cheap and stable.
+
+### Thumbnails in GTK
+
+- We decode straight to the reduced size:
   `gdk_pixbuf_new_from_stream_at_scale(stream, max_w, max_h, preserve_aspect=TRUE)`
-  — не грузим полноразмерный pixbuf в память ради иконки списка.
-- Фиксированная высота строки; миниатюра `contain`, с alpha (шахматный фон).
-- Ленивый рендер: pixbuf миниатюры создаём для видимых строк, отпускаем при
-  прокрутке (память — см. #3247/#3375).
-- Полноразмерное превью (при hover/выборе) — тоже вписываем в панель (#3577),
-  и держим полноразмерный pixbuf только для одного текущего элемента.
+  — we don't load a full-size pixbuf into memory for the sake of a list icon.
+- Fixed row height; thumbnail `contain`, with alpha (checkerboard background).
+- Lazy rendering: we create the thumbnail pixbuf for visible rows, release it on scroll
+  (memory — see #3247/#3375).
+- The full-size preview (on hover/selection) — also fitted into the panel (#3577), and we
+  keep a full-size pixbuf only for the one current element.
 
-### Лимит памяти
+### Memory limit
 
-- Cap на один захват (напр. 24–32 MiB на target) — больше не тянем (#2523).
-- Cap на суммарный объём image-истории (напр. 128–256 MiB) с LRU-вытеснением.
-- Храним **сжатые оригинальные байты**, не декодированные RGBA. Декодируем
-  только миниатюру и только текущее превью.
+- A cap on a single capture (e.g. 24–32 MiB per target) — beyond that we don't pull
+  (#2523).
+- A cap on the total volume of the image history (e.g. 128–256 MiB) with LRU eviction.
+- We store the **compressed original bytes**, not decoded RGBA. We decode only the
+  thumbnail and only the current preview.
 
-### Отдача картинки как владелец X11-selection
+### Handing the image over as X11 selection owner
 
-- Наш резидентный daemon владеет CLIPBOARD. В `TARGETS` заявляем **только**
-  реально хранимые image-таргеты + служебные (`TARGETS`, `TIMESTAMP`,
-  `MULTIPLE`) (#957 — иначе ломаем чужие копирования).
-- На `SelectionRequest` отдаём **сохранённые байты запрошенного target без
-  переконвертации** (#2185, #2961). Если можем синтезировать (напр. BMP из
-  PNG) — только по явному запросу, primary не подменяем.
-- Крупные данные — через INCR (#1070). Реализуем и приём, и отдачу чанками.
-- После XTEST-вставки продолжаем владеть selection (не отпускаем сразу), пока
-  приложение-получатель дочитывает данные (особенно при INCR).
+- Our resident daemon owns CLIPBOARD. In `TARGETS` we declare **only** the actually
+  stored image targets + the service ones (`TARGETS`, `TIMESTAMP`, `MULTIPLE`) (#957 —
+  otherwise we break other applications' copies).
+- On `SelectionRequest` we hand over the **stored bytes of the requested target without
+  re-conversion** (#2185, #2961). If we can synthesize (e.g. BMP from PNG) — only on an
+  explicit request, we don't substitute the primary.
+- Large data — via INCR (#1070). We implement both receiving and handing over in chunks.
+- After the XTEST paste we continue to own the selection (we don't release it
+  immediately) while the receiving application finishes reading the data (especially with
+  INCR).
 
-### Terminal-aware вставка
+### Terminal-aware pasting
 
-Картинки в терминалах бессмысленны. Если целевое окно (куда будем вставлять
-через XTEST) — терминал (по WM_CLASS: gnome-terminal, xterm, kitty, alacritty,
-konsole и т.п.), то для image-элемента:
+Images in terminals are meaningless. If the target window (where we'll paste via XTEST)
+is a terminal (by WM_CLASS: gnome-terminal, xterm, kitty, alacritty, konsole, etc.), then
+for an image element:
 
-- либо **дизейблим** вставку картинки (item неактивен / серый),
-- либо вставляем **fallback-текст** (напр. путь к сохранённому temp-файлу, если
-  включён режим «сохранять на диск»), но по умолчанию — просто skip с подсказкой.
+- either we **disable** the image paste (item inactive / grayed out),
+- or we paste **fallback text** (e.g. the path to the saved temp file, if "save to disk"
+  mode is enabled), but by default — just skip with a hint.
 
-Это же правило страхует от XTEST-вставки бинарных байтов в TTY.
+This same rule guards against an XTEST paste of binary bytes into a TTY.
 
 ---
 
-## Открытые вопросы
+## Open questions
 
-- **Хранить ли на диске?** Сегодня gnome-clipboard-history-native in-memory. Картинки быстро упрутся в
-  память (#3247/#3375). Возможно, для image-элементов нужен опциональный
-  disk-backing (temp-файлы), тогда легко решается и «Save as», и «вставить в
-  терминал путём» — но это отход от in-memory-принципа. Решить.
-- **Синтез форматов по запросу.** Отдавать ли BMP/JPEG, если храним только PNG
-  (для приложений, что просят строго BMP)? Это удобно, но рискует повторить
-  #2961 (несовпадение качества). Отдавать только по явному запросу?
-- **Точный лимит размера** одного захвата и суммарной image-истории — подобрать
-  эмпирически на реальных 4K-скриншотах.
-- **INCR** — насколько полно поддерживать в первой версии? Минимум для приёма
-  больших PNG нужен сразу; отдачу по INCR — тоже (иначе не вставим большой
-  скрин в GIMP, #1070).
-- **`.webp` / `.avif`** — рендерить ли миниатюру (нужен loader в GdkPixbuf)?
-  CopyQ споткнулся на webp (#2936). Проверить, что Yaru/GTK-стек умеет их
-  декодировать, иначе — иконка-заглушка.
-- **uri-list на картинку**: показывать превью файла — да, но при вставке
-  отдавать пиксели или сам файл (uri-list)? Вероятно, оставить как есть
-  (файловая операция), не превращая в image-paste.
+- **Store to disk?** Today gnome-clipboard-history-native is in-memory. Images will quickly hit the
+  memory ceiling (#3247/#3375). Perhaps image elements need optional disk-backing (temp
+  files), which would then easily solve both "Save as" and "paste into terminal by path"
+  — but that's a departure from the in-memory principle. To decide.
+- **On-demand format synthesis.** Should we hand over BMP/JPEG if we store only PNG (for
+  applications that ask strictly for BMP)? It's convenient, but risks repeating #2961 (a
+  quality mismatch). Hand over only on an explicit request?
+- **The exact size limit** for a single capture and the total image history — tune
+  empirically on real 4K screenshots.
+- **INCR** — how fully to support it in the first version? The minimum for receiving
+  large PNGs is needed right away; handing over via INCR too (otherwise we won't paste a
+  large screenshot into GIMP, #1070).
+- **`.webp` / `.avif`** — should we render a thumbnail (needs a loader in GdkPixbuf)?
+  CopyQ tripped on webp (#2936). Check that the Yaru/GTK stack can decode them,
+  otherwise — a placeholder icon.
+- **uri-list to an image**: show a file preview — yes, but on paste hand over the pixels
+  or the file itself (uri-list)? Probably leave it as-is (a file operation), not turning
+  it into an image-paste.

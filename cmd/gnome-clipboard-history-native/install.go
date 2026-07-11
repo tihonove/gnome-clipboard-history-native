@@ -1,7 +1,7 @@
 //go:build linux
 
-// install.go — установка/удаление (--install / --uninstall): автозапуск,
-// GNOME-хоткей через gsettings custom keybinding и helpers для gsettings и путей.
+// install.go — install/uninstall (--install / --uninstall): autostart,
+// GNOME hotkey via a gsettings custom keybinding, and helpers for gsettings and paths.
 package main
 
 import (
@@ -22,12 +22,12 @@ const (
 	customPrefix    = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
 )
 
-// Боевые значения хоткея — по умолчанию. env-оверрайды поднимают ПАРАЛЛЕЛЬНЫЙ
-// дев-инстанс со своим слотом gsettings и своей клавишей, не трогая установленный:
+// Production hotkey values — the defaults. env overrides bring up a PARALLEL
+// dev instance with its own gsettings slot and its own key, without touching the installed one:
 //
-//	GCHN_NAME   — имя слота/автозапуска (напр. gnome-clipboard-history-native-dev),
-//	GCHN_HOTKEY — клавиша (напр. <Super><Control>b),
-//	GCHN_SOCK   — свой сокет (см. sockPath), прокидывается в команду хоткея.
+//	GCHN_NAME   — slot/autostart name (e.g. gnome-clipboard-history-native-dev),
+//	GCHN_HOTKEY — key (e.g. <Super><Control>b),
+//	GCHN_SOCK   — its own socket (see sockPath), passed into the hotkey command.
 func hotkeyName() string {
 	if n := os.Getenv("GCHN_NAME"); n != "" {
 		return n
@@ -42,12 +42,12 @@ func hotkeyBinding() string {
 	return "<Super><Control>v"
 }
 
-// isDevInstance — задан ли GCHN_NAME (дев). У дева нет автозапуска: демона
-// запускаем вручную — вся разница именно в этом.
+// isDevInstance — whether GCHN_NAME is set (dev). The dev instance has no autostart: the daemon
+// is started manually — that's the whole difference.
 func isDevInstance() bool { return hotkeyName() != "gnome-clipboard-history-native" }
 
-// showCommand — команда gsettings-хоткея. Для дева прокидываем GCHN_SOCK, чтобы
-// попап шёл на дев-сокет, а не на боевой.
+// showCommand — the gsettings hotkey command. For the dev instance we pass GCHN_SOCK so
+// the popup goes to the dev socket rather than the production one.
 func showCommand(exe string) string {
 	if s := os.Getenv("GCHN_SOCK"); s != "" {
 		return "env GCHN_SOCK=" + s + " " + exe + " --show"
@@ -55,52 +55,52 @@ func showCommand(exe string) string {
 	return exe + " --show"
 }
 
-// runInstall прописывает автозапуск и горячую клавишу на текущий путь бинарника
-// и запускает демона. Идемпотентно — можно запускать повторно.
+// runInstall registers autostart and the hotkey pointing at the current binary path
+// and starts the daemon. Idempotent — safe to run repeatedly.
 func runInstall() {
 	exe := resolveExe()
 	installAutostart(exe)
 	installHotkey(exe)
 	startDaemon(exe)
-	// Wayland: вставка идёт через /dev/uinput. Если доступа нет и правило ещё не
-	// положено пакетом — настраиваем один раз (runSetupInput сам эскалируется и
-	// перезапускает демона). На X11 uinput не нужен.
+	// Wayland: paste goes through /dev/uinput. If there's no access and the rule hasn't
+	// been placed by the package yet — set it up once (runSetupInput escalates itself and
+	// restarts the daemon). On X11 uinput is not needed.
 	if isWayland() && !uinput.HasAccess() && !ruleInstalled() {
-		fmt.Println("\nWayland: для вставки нужен доступ к /dev/uinput — настраиваю (один раз)…")
+		fmt.Println("\nWayland: paste needs access to /dev/uinput — setting it up (one time)…")
 		runSetupInput()
 	}
 	if isDevInstance() {
-		fmt.Printf("Готово (dev %q). Хоткей %s настроен, демон запущен.\n", hotkeyName(), hotkeyBinding())
+		fmt.Printf("Done (dev %q). Hotkey %s configured, daemon started.\n", hotkeyName(), hotkeyBinding())
 	} else {
-		fmt.Printf("Готово. gnome-clipboard-history-native в автозапуске, хоткей %s настроен, демон запущен.\n", hotkeyBinding())
+		fmt.Printf("Done. gnome-clipboard-history-native is in autostart, hotkey %s configured, daemon started.\n", hotkeyBinding())
 	}
 }
 
 func runUninstall() {
 	if err := os.Remove(autostartPath()); err == nil {
-		fmt.Println("убран автозапуск:", autostartPath())
+		fmt.Println("removed autostart:", autostartPath())
 	}
 	removeHotkey()
 	if c, err := net.Dial("unix", sockPath()); err == nil {
 		c.Write([]byte("quit\n"))
 		c.Close()
-		fmt.Println("демон остановлен")
+		fmt.Println("daemon stopped")
 	}
 	if ruleInstalled() {
-		fmt.Println("udev-правило /dev/uinput оставлено (могло понадобиться другим). " +
-			"Чтобы убрать: gnome-clipboard-history-native --remove-input")
+		fmt.Println("udev rule for /dev/uinput left in place (it may be needed by others). " +
+			"To remove it: gnome-clipboard-history-native --remove-input")
 	}
-	fmt.Println("Готово. gnome-clipboard-history-native убран из автозапуска и хоткеев.")
+	fmt.Println("Done. gnome-clipboard-history-native removed from autostart and hotkeys.")
 }
 
 func autostartPath() string {
-	// имя файла — по GCHN_NAME, чтобы дев-инстанс не затирал боевой автозапуск.
+	// file name — based on GCHN_NAME, so a dev instance doesn't overwrite the production autostart.
 	return filepath.Join(xdgConfigHome(), "autostart", hotkeyName()+".desktop")
 }
 
 func installAutostart(exe string) {
 	if isDevInstance() {
-		return // дев запускаем вручную — автозапуск не нужен
+		return // the dev instance is started manually — no autostart needed
 	}
 	dir := filepath.Join(xdgConfigHome(), "autostart")
 	os.MkdirAll(dir, 0o755)
@@ -113,20 +113,20 @@ func installAutostart(exe string) {
 		"NoDisplay=true\n" +
 		"Terminal=false\n"
 	if err := os.WriteFile(autostartPath(), []byte(content), 0o644); err != nil {
-		log.Fatalf("автозапуск: %v", err)
+		log.Fatalf("autostart: %v", err)
 	}
-	fmt.Println("автозапуск:", autostartPath())
+	fmt.Println("autostart:", autostartPath())
 }
 
 func installHotkey(exe string) {
 	cmd := showCommand(exe)
 	name := hotkeyName()
 	list := gsList()
-	for _, p := range list { // наш слот (по имени) уже есть? — обновить команду/клавишу
+	for _, p := range list { // does our slot (by name) already exist? — update command/key
 		if unquote(gsGet(customPath(p), "name")) == name {
 			gsSet(customPath(p), "command", quote(cmd))
 			gsSet(customPath(p), "binding", quote(hotkeyBinding()))
-			fmt.Printf("хоткей обновлён (%s → %s): %s\n", name, hotkeyBinding(), p)
+			fmt.Printf("hotkey updated (%s → %s): %s\n", name, hotkeyBinding(), p)
 			return
 		}
 	}
@@ -136,7 +136,7 @@ func installHotkey(exe string) {
 	gsSet(customPath(slot), "name", quote(name))
 	gsSet(customPath(slot), "command", quote(cmd))
 	gsSet(customPath(slot), "binding", quote(hotkeyBinding()))
-	fmt.Printf("хоткей %s → %s: %s\n", hotkeyBinding(), name, slot)
+	fmt.Printf("hotkey %s → %s: %s\n", hotkeyBinding(), name, slot)
 }
 
 func removeHotkey() {
@@ -144,11 +144,11 @@ func removeHotkey() {
 	kept := make([]string, 0, len(list))
 	for _, p := range list {
 		if unquote(gsGet(customPath(p), "name")) == hotkeyName() {
-			// сбросить ключи слота
+			// reset the slot's keys
 			for _, k := range []string{"name", "command", "binding"} {
 				exec.Command("gsettings", "reset", customPath(p), k).Run()
 			}
-			fmt.Println("убран хоткей:", p)
+			fmt.Println("removed hotkey:", p)
 			continue
 		}
 		kept = append(kept, p)
@@ -156,23 +156,23 @@ func removeHotkey() {
 	gsSet(mediaKeysSchema, "custom-keybindings", formatList(kept))
 }
 
-// startDaemon запускает демона отдельным сеансом, если он ещё не запущен.
+// startDaemon starts the daemon in a separate session, if it isn't already running.
 func startDaemon(exe string) {
 	if c, err := net.Dial("unix", sockPath()); err == nil {
 		c.Close()
-		fmt.Println("демон уже запущен")
+		fmt.Println("daemon is already running")
 		return
 	}
 	c := exec.Command(exe)
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := c.Start(); err != nil {
-		fmt.Println("не удалось запустить демона:", err, "— стартанёт при следующем входе")
+		fmt.Println("failed to start the daemon:", err, "— it will start at the next login")
 		return
 	}
-	fmt.Println("демон запущен")
+	fmt.Println("daemon started")
 }
 
-// --- helpers для gsettings и путей ---
+// --- helpers for gsettings and paths ---
 
 func xdgConfigHome() string {
 	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
@@ -197,7 +197,7 @@ func gsSet(schema, key, val string) {
 
 func gsList() []string { return parseList(gsGet(mediaKeysSchema, "custom-keybindings")) }
 
-// freeSlot возвращает путь первого свободного customN/.
+// freeSlot returns the path of the first free customN/.
 func freeSlot(list []string) string {
 	used := map[string]bool{}
 	for _, p := range list {

@@ -1,7 +1,7 @@
 name: Bump Version
 
-# Поднимает версию в файле VERSION, коммитит chore(release): vX.Y.Z и пушит тег.
-# Пуш тега, в свою очередь, триггерит release.yml.
+# Bumps the version in the VERSION file, commits chore(release): vX.Y.Z, and pushes the tag.
+# Pushing the tag, in turn, triggers release.yml.
 on:
   workflow_dispatch:
     inputs:
@@ -24,9 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Нужен PAT (не дефолтный GITHUB_TOKEN), иначе пуш тега не запустит
-          # release.yml (защита от рекурсии воркфлоу). Секрет REPOSITORY_PAT —
-          # personal access token с правом contents:write.
+          # A PAT is required (not the default GITHUB_TOKEN), otherwise pushing the tag won't trigger
+          # release.yml (workflow-recursion protection). The REPOSITORY_PAT secret is a
+          # personal access token with contents:write.
           token: ${{ secrets.REPOSITORY_PAT }}
 
       - name: Configure Git user
@@ -47,7 +47,7 @@ jobs:
           echo "$new" > VERSION
           git add VERSION
           git commit -m "chore(release): v$new"
-          # Аннотированный тег: git push --follow-tags пушит только их (лёгкие — нет).
+          # Annotated tag: git push --follow-tags pushes only those (lightweight ones aren't).
           git tag -a "v$new" -m "v$new"
 
       - name: Push commit and tag

@@ -1,3 +1,3 @@
-# gnome-clipboard-history-native: доступ к /dev/uinput для синтетической вставки на Wayland (Shift+Insert).
-# uaccess — мгновенный ACL пользователю активной локальной сессии (systemd, без релогина).
+# gnome-clipboard-history-native: access to /dev/uinput for synthetic pasting on Wayland (Shift+Insert).
+# uaccess — an instant ACL for the user of the active local session (systemd, no re-login needed).
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

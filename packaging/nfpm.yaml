@@ -1,9 +1,9 @@
-# nfpm — сборка .deb из готового бинарника gnome-clipboard-history-native-linux-x64.
-# Установку в сессии делает сам бинарник (`gnome-clipboard-history-native --install`:
-# автозапуск, хоткей, демон). Пакет лишь раскладывает бинарник и СТАТИЧЕСКИ кладёт
-# udev-правило (uaccess) — тогда `--install` видит, что доступ к /dev/uinput уже
-# настроен, и не дёргает sudo. Версия берётся из env VERSION (в CI — тег без ведущей v).
-# Док: https://nfpm.goreleaser.com/configuration/
+# nfpm — build a .deb from the prebuilt gnome-clipboard-history-native-linux-x64 binary.
+# Session setup is done by the binary itself (`gnome-clipboard-history-native --install`:
+# autostart, hotkey, daemon). The package only lays down the binary and STATICALLY installs
+# the udev rule (uaccess) — then `--install` sees that access to /dev/uinput is already
+# configured and doesn't invoke sudo. The version comes from the VERSION env (in CI — the tag without the leading v).
+# Docs: https://nfpm.goreleaser.com/configuration/
 name: gnome-clipboard-history-native
 arch: amd64
 platform: linux
@@ -16,10 +16,10 @@ homepage: https://github.com/tihonove/gnome-clipboard-history-native
 license: MIT
 description: |
   Clipboard history (Super+Ctrl+V) for GNOME on X11 and Wayland.
-  TODO: развёрнутое описание для магазина/репозитория.
+  TODO: a fuller description for the store/repository.
 
-# GTK3 — попап; gsettings (libglib2.0-bin) — чтобы --install прописал хоткей.
-# XWayland нужен только для истории под Wayland — поэтому recommends.
+# GTK3 — the popup; gsettings (libglib2.0-bin) — so --install can register the hotkey.
+# XWayland is only needed for history under Wayland — hence recommends.
 depends:
   - libgtk-3-0
   - libglib2.0-bin
@@ -31,9 +31,9 @@ contents:
     dst: /usr/bin/gnome-clipboard-history-native
     file_info:
       mode: 0755
-  # udev-правило uaccess: доступ к /dev/uinput для активной сессии (Wayland-вставка).
-  # Кладём в /usr/lib (вендорский путь пакета) — ровно pkgUdevRulePath из бинарника,
-  # поэтому `gnome-clipboard-history-native --install` не эскалируется, правило уже на месте.
+  # uaccess udev rule: access to /dev/uinput for the active session (Wayland pasting).
+  # Placed in /usr/lib (the package's vendor path) — exactly pkgUdevRulePath from the binary,
+  # so `gnome-clipboard-history-native --install` doesn't escalate; the rule is already in place.
   - src: ./packaging/udev/60-gnome-clipboard-history-native-uinput.rules
     dst: /usr/lib/udev/rules.d/60-gnome-clipboard-history-native-uinput.rules
     file_info:

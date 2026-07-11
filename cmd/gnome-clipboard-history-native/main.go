@@ -1,16 +1,16 @@
 //go:build linux
 
-// gnome-clipboard-history-native — нативная история буфера обмена (Super+Ctrl+V) для GNOME (X11 + Wayland).
+// gnome-clipboard-history-native — native clipboard history (Super+Ctrl+V) for GNOME (X11 + Wayland).
 //
-// Резидентный GTK-демон. По Super+Ctrl+V (через GNOME-хоткей → --show → сокет)
-// показывает у курсора/окна попап: заголовок "Clipboard" + прокручиваемый список
-// записей. Каждая запись обрезается до 3 строк. Выделение — акцентная обводка
-// (Yaru accent) как фокус файла в Nautilus. Up/Down двигают выделение, Enter
-// вставляет выбранное в прежнее окно, Escape закрывает.
+// A resident GTK daemon. On Super+Ctrl+V (via GNOME hotkey → --show → socket) it
+// shows a popup at the cursor/window: a "Clipboard" header + a scrollable list of
+// entries. Each entry is truncated to 3 lines. Selection is an accent outline
+// (Yaru accent) like file focus in Nautilus. Up/Down move the selection, Enter
+// pastes the selected entry into the previous window, Escape closes.
 //
-// Ввод берём через xgb (GrabKeyboard на root) — у всплывшего GTK-окна GNOME
-// отбирает фокус (focus-stealing prevention). Навигацию по списку из-за этого
-// делаем сами и вручную двигаем выделение GTK-виджета.
+// Input is taken via xgb (GrabKeyboard on root) — GNOME steals focus from a popped-up
+// GTK window (focus-stealing prevention). Because of that we handle list navigation
+// ourselves and move the GTK widget's selection manually.
 package main
 
 import (
@@ -18,7 +18,7 @@ import (
 	"os"
 )
 
-// version зашивается при релизной сборке через -ldflags "-X main.version=…".
+// version is baked in at release build time via -ldflags "-X main.version=…".
 var version = "dev"
 
 func main() {
@@ -39,32 +39,32 @@ func main() {
 		case "--remove-input":
 			runRemoveInput()
 			return
-		case "__setup-input-root": // скрытый: привилегированная часть (через pkexec/sudo)
+		case "__setup-input-root": // hidden: privileged part (via pkexec/sudo)
 			runSetupInputPrivileged()
 			return
-		case "__remove-input-root": // скрытый: привилегированная часть
+		case "__remove-input-root": // hidden: privileged part
 			runRemoveInputPrivileged()
 			return
 		case "--version", "-v":
 			fmt.Println("gnome-clipboard-history-native", version)
 			return
 		case "--help", "-h":
-			fmt.Println("gnome-clipboard-history-native — история буфера (Super+Ctrl+V) для GNOME (X11 + базовый Wayland)\n" +
-				"  gnome-clipboard-history-native             запустить демона\n" +
-				"  gnome-clipboard-history-native --install   прописать автозапуск и хоткей Super+Ctrl+V, запустить демона\n" +
-				"  gnome-clipboard-history-native --uninstall убрать автозапуск и хоткей\n" +
-				"  gnome-clipboard-history-native --setup-input  один раз настроить доступ к /dev/uinput для вставки (Wayland)\n" +
-				"  gnome-clipboard-history-native --remove-input убрать udev-правило /dev/uinput\n" +
-				"  gnome-clipboard-history-native --show      показать попап (вызывается хоткеем)\n" +
-				"  gnome-clipboard-history-native --version   версия\n" +
+			fmt.Println("gnome-clipboard-history-native — clipboard history (Super+Ctrl+V) for GNOME (X11 + basic Wayland)\n" +
+				"  gnome-clipboard-history-native             start the daemon\n" +
+				"  gnome-clipboard-history-native --install   set up autostart and the Super+Ctrl+V hotkey, start the daemon\n" +
+				"  gnome-clipboard-history-native --uninstall remove autostart and the hotkey\n" +
+				"  gnome-clipboard-history-native --setup-input  set up /dev/uinput access for pasting once (Wayland)\n" +
+				"  gnome-clipboard-history-native --remove-input remove the /dev/uinput udev rule\n" +
+				"  gnome-clipboard-history-native --show      show the popup (invoked by the hotkey)\n" +
+				"  gnome-clipboard-history-native --version   version\n" +
 				"\n" +
-				"Wayland (GNOME): попап по центру, вставка через /dev/uinput (Shift+Insert),\n" +
-				"история — через XWayland-мост (mutter зеркалит буфер в X11 CLIPBOARD).\n" +
-				"  * доступ к /dev/uinput настраивается автоматически при --install\n" +
-				"    (или отдельно: gnome-clipboard-history-native --setup-input; .deb кладёт udev-правило сам);\n" +
-				"  * для истории нужен XWayland (обычно уже включён);\n" +
-				"  * переключение раскладки настроить через GNOME Tweaks (не Settings),\n" +
-				"    иначе модификаторы «съедаются» и хоткей/вставка ломаются на 2-й раскладке.")
+				"Wayland (GNOME): centered popup, pasting via /dev/uinput (Shift+Insert),\n" +
+				"history via an XWayland bridge (mutter mirrors the buffer to the X11 CLIPBOARD).\n" +
+				"  * /dev/uinput access is set up automatically on --install\n" +
+				"    (or separately: gnome-clipboard-history-native --setup-input; the .deb installs the udev rule itself);\n" +
+				"  * history requires XWayland (usually already enabled);\n" +
+				"  * configure layout switching via GNOME Tweaks (not Settings),\n" +
+				"    otherwise modifiers get \"eaten\" and the hotkey/paste break on the 2nd layout.")
 			return
 		}
 	}

@@ -1,21 +1,21 @@
 //go:build linux
 
-// uinput_setup.go — единоразовая привилегированная настройка доступа к /dev/uinput
-// (--setup-input / --remove-input), нужная для синтетической вставки на Wayland.
+// uinput_setup.go — one-time privileged setup of access to /dev/uinput
+// (--setup-input / --remove-input), needed for synthetic pasting on Wayland.
 //
-// Wayland по дизайну запрещает инжект ввода в чужие окна, поэтому вставку мы делаем
-// через собственное устройство /dev/uinput (см. internal/uinput) — ровно как CopyQ
-// через ydotool. Устройство по умолчанию доступно только root; чтобы демон (обычный
-// пользовательский процесс) мог в него писать, нужно один раз положить udev-правило.
+// By design Wayland forbids injecting input into other apps' windows, so we paste
+// through our own /dev/uinput device (see internal/uinput) — exactly like CopyQ
+// via ydotool. The device is root-only by default; for the daemon (an ordinary
+// user process) to write to it, a udev rule must be installed once.
 //
-// Правило — системный артефакт (ставится root'ом раз на машину). Два канала доставки:
-//   - .deb/.rpm: пакет статически кладёт то же правило в /usr/lib/udev/rules.d —
-//     тогда доступ есть сразу после установки, код ниже не задействуется;
-//   - голый бинарник: gnome-clipboard-history-native сам эскалируется (pkexec/sudo) и пишет правило в /etc.
+// The rule is a system artifact (installed by root once per machine). Two delivery channels:
+//   - .deb/.rpm: the package statically ships the same rule to /usr/lib/udev/rules.d —
+//     then access is available right after install and the code below is not used;
+//   - bare binary: gnome-clipboard-history-native escalates itself (pkexec/sudo) and writes the rule to /etc.
 //
-// Привилегированную запись делает НАШ ЖЕ бинарник со скрытым сабкомандом
-// __setup-input-root — так все операции остаются на Go (os.WriteFile), без хрупких
-// shell-heredoc и кавычек.
+// The privileged write is performed by OUR OWN binary via the hidden subcommand
+// __setup-input-root — this keeps all operations in Go (os.WriteFile), without fragile
+// shell heredocs and quoting.
 package main
 
 import (
@@ -33,31 +33,31 @@ import (
 )
 
 const (
-	// Когда правило пишем сами — кладём в /etc (перекрывает дистрибутивные правила).
+	// When we write the rule ourselves — put it in /etc (overrides distro rules).
 	udevRulePath    = "/etc/udev/rules.d/60-gnome-clipboard-history-native-uinput.rules"
 	modulesLoadPath = "/etc/modules-load.d/gnome-clipboard-history-native-uinput.conf"
-	// Пакет мог положить то же правило сюда — тогда настройка уже сделана.
+	// The package may have placed the same rule here — then setup is already done.
 	pkgUdevRulePath = "/usr/lib/udev/rules.d/60-gnome-clipboard-history-native-uinput.rules"
 )
 
-// udevRuleContent — единый текст правила (тот же кладёт и .deb). uaccess даёт
-// мгновенный ACL пользователю активной локальной сессии (systemd, без релогина и
-// без группы) — единственный механизм, никаких запасных путей.
-const udevRuleContent = `# gnome-clipboard-history-native: доступ к /dev/uinput для синтетической вставки на Wayland (Shift+Insert).
-# uaccess — мгновенный ACL пользователю активной локальной сессии (systemd, без релогина).
+// udevRuleContent — the single rule text (the .deb ships the same one). uaccess grants
+// an instant ACL to the user of the active local session (systemd, no re-login and
+// no group) — the only mechanism, with no fallback paths.
+const udevRuleContent = `# gnome-clipboard-history-native: access to /dev/uinput for synthetic pasting on Wayland (Shift+Insert).
+# uaccess — an instant ACL for the user of the active local session (systemd, no re-login needed).
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 `
 
-const modulesLoadContent = `# gnome-clipboard-history-native: uinput нужен для вставки на Wayland
+const modulesLoadContent = `# gnome-clipboard-history-native: uinput is needed for pasting on Wayland
 uinput
 `
 
-// resolveExe возвращает абсолютный путь текущего бинарника (с разыменованием симлинков).
-// Нужен для автозапуска, хоткея и эскалации (pkexec/sudo требуют полный путь).
+// resolveExe returns the absolute path of the current binary (resolving symlinks).
+// Needed for autostart, the hotkey, and escalation (pkexec/sudo require a full path).
 func resolveExe() string {
 	exe, err := os.Executable()
 	if err != nil {
-		log.Fatalf("не могу определить путь бинарника: %v", err)
+		log.Fatalf("cannot determine binary path: %v", err)
 	}
 	if resolved, e := filepath.EvalSymlinks(exe); e == nil {
 		exe = resolved
@@ -65,7 +65,7 @@ func resolveExe() string {
 	return exe
 }
 
-// ruleInstalled — стоит ли уже наше udev-правило (в /etc или положенное пакетом).
+// ruleInstalled — whether our udev rule is already present (in /etc or installed by the package).
 func ruleInstalled() bool {
 	for _, p := range []string{udevRulePath, pkgUdevRulePath} {
 		if _, err := os.Stat(p); err == nil {
@@ -75,84 +75,84 @@ func ruleInstalled() bool {
 	return false
 }
 
-// runSetupInput — user-facing (--setup-input): один раз настроить доступ к /dev/uinput.
+// runSetupInput — user-facing (--setup-input): set up access to /dev/uinput once.
 func runSetupInput() {
-	// Доступ уже есть — вставка работает, эскалироваться незачем (не дёргаем sudo зря).
+	// Access already exists — pasting works, no need to escalate (don't invoke sudo needlessly).
 	if uinput.HasAccess() {
 		if ruleInstalled() {
-			fmt.Println("Доступ к /dev/uinput уже настроен — ничего делать не нужно.")
+			fmt.Println("Access to /dev/uinput is already configured — nothing to do.")
 		} else {
-			fmt.Println("Доступ к /dev/uinput уже есть — вставка на Wayland работает, правило не требуется.")
+			fmt.Println("Access to /dev/uinput already exists — pasting on Wayland works, no rule needed.")
 		}
 		return
 	}
 	exe := resolveExe()
 
 	if os.Geteuid() == 0 {
-		// Уже root (sudo gnome-clipboard-history-native --setup-input или deb-postinst) — настраиваем напрямую.
+		// Already root (sudo gnome-clipboard-history-native --setup-input or deb postinst) — set up directly.
 		runSetupInputPrivileged()
-		fmt.Println("Готово. Доступ к /dev/uinput настроен (uaccess).")
+		fmt.Println("Done. Access to /dev/uinput is configured (uaccess).")
 		return
 	}
 
 	if err := elevateSelf(exe, "__setup-input-root"); err != nil {
-		log.Fatalf("привилегированная настройка не удалась: %v", err)
+		log.Fatalf("privileged setup failed: %v", err)
 	}
 
-	// Снова обычный пользователь — можно честно проверить свой доступ.
+	// An ordinary user again — we can honestly check our own access.
 	if uinput.HasAccess() {
-		fmt.Println("Готово. Доступ к /dev/uinput получен — вставка на Wayland заработает.")
+		fmt.Println("Done. Access to /dev/uinput obtained — pasting on Wayland will work.")
 		restartDaemon(exe)
 	} else {
-		fmt.Println("udev-правило установлено, но ACL ещё не выдан — попробуйте выйти из сессии и войти снова.")
+		fmt.Println("The udev rule is installed, but the ACL hasn't been granted yet — try logging out of the session and back in.")
 	}
 }
 
-// runSetupInputPrivileged — скрытый __setup-input-root: собственно привилегированные шаги.
+// runSetupInputPrivileged — hidden __setup-input-root: the actual privileged steps.
 func runSetupInputPrivileged() {
 	if os.Geteuid() != 0 {
-		log.Fatal("__setup-input-root требует root")
+		log.Fatal("__setup-input-root requires root")
 	}
 	loadModule()
 	if err := writeSystemFile(udevRulePath, udevRuleContent); err != nil {
-		log.Fatalf("запись правила %s: %v", udevRulePath, err)
+		log.Fatalf("writing rule %s: %v", udevRulePath, err)
 	}
-	fmt.Println("udev-правило:", udevRulePath)
+	fmt.Println("udev rule:", udevRulePath)
 	if err := writeSystemFile(modulesLoadPath, modulesLoadContent); err != nil {
-		log.Fatalf("запись %s: %v", modulesLoadPath, err)
+		log.Fatalf("writing %s: %v", modulesLoadPath, err)
 	}
 	reloadUdev()
 }
 
-// runRemoveInput / runRemoveInputPrivileged — снять правило (при --uninstall/--remove-input).
+// runRemoveInput / runRemoveInputPrivileged — remove the rule (on --uninstall/--remove-input).
 func runRemoveInput() {
 	if os.Geteuid() == 0 {
 		runRemoveInputPrivileged()
 		return
 	}
 	if !ruleInstalled() {
-		fmt.Println("udev-правило не установлено — нечего убирать.")
+		fmt.Println("The udev rule is not installed — nothing to remove.")
 		return
 	}
 	if err := elevateSelf(resolveExe(), "__remove-input-root"); err != nil {
-		log.Fatalf("не удалось убрать правило: %v", err)
+		log.Fatalf("could not remove the rule: %v", err)
 	}
 }
 
 func runRemoveInputPrivileged() {
 	if os.Geteuid() != 0 {
-		log.Fatal("__remove-input-root требует root")
+		log.Fatal("__remove-input-root requires root")
 	}
 	for _, p := range []string{udevRulePath, modulesLoadPath} {
 		if err := os.Remove(p); err == nil {
-			fmt.Println("удалено:", p)
+			fmt.Println("removed:", p)
 		}
 	}
 	reloadUdev()
-	// Членство в группе input не трогаем — безвредно и могло понадобиться другим утилитам.
+	// We leave input-group membership alone — it's harmless and may be needed by other tools.
 }
 
-// --- привилегированные шаги (выполняются под root) ---
+// --- privileged steps (run as root) ---
 
 func writeSystemFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -163,8 +163,8 @@ func writeSystemFile(path, content string) error {
 
 func loadModule() {
 	if err := exec.Command("modprobe", "uinput").Run(); err != nil {
-		// Не критично: модуль мог быть вкомпилен в ядро.
-		log.Printf("modprobe uinput: %v (возможно, вкомпилен в ядро — не критично)", err)
+		// Not critical: the module may be compiled into the kernel.
+		log.Printf("modprobe uinput: %v (may be compiled into the kernel — not critical)", err)
 	}
 }
 
@@ -177,9 +177,9 @@ func reloadUdev() {
 	}
 }
 
-// --- эскалация и утилиты ---
+// --- escalation and utilities ---
 
-// elevateSelf перезапускает наш бинарник под root: sudo из терминала, иначе pkexec (GUI).
+// elevateSelf re-runs our binary as root: sudo from a terminal, otherwise pkexec (GUI).
 func elevateSelf(exe string, args ...string) error {
 	full := append([]string{exe}, args...)
 	var name string
@@ -191,19 +191,19 @@ func elevateSelf(exe string, args ...string) error {
 	case haveCmd("sudo"):
 		name = "sudo"
 	default:
-		return fmt.Errorf("нужен sudo или pkexec для настройки прав на %s", uinput.DevPath)
+		return fmt.Errorf("sudo or pkexec is required to configure permissions on %s", uinput.DevPath)
 	}
 	c := exec.Command(name, full...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return c.Run()
 }
 
-// restartDaemon перезапускает демона, чтобы uinput.Init подхватил новый доступ.
+// restartDaemon restarts the daemon so uinput.Init picks up the new access.
 func restartDaemon(exe string) {
 	if c, err := net.Dial("unix", sockPath()); err == nil {
 		c.Write([]byte("quit\n"))
 		c.Close()
-		time.Sleep(300 * time.Millisecond) // дать сокету освободиться
+		time.Sleep(300 * time.Millisecond) // give the socket time to free up
 	}
 	startDaemon(exe)
 }

@@ -1,7 +1,7 @@
-# Конфиг git-cliff для gnome-clipboard-history-native.
-# Цель: changelog показывает только пользовательские изменения.
-# Инфраструктура (CI, сборка, тесты, рефакторинг, доки, стиль) из changelog скрыта.
-# Конвенция коммитов, на которую это опирается, описана в CLAUDE.md (секция «Коммиты»).
+# git-cliff config for gnome-clipboard-history-native.
+# Goal: the changelog shows only user-facing changes.
+# Infrastructure (CI, build, tests, refactoring, docs, style) is hidden from the changelog.
+# The commit convention this relies on is described in CLAUDE.md (the "Commits" section).
 
 [changelog]
 header = ""

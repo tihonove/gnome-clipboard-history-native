@@ -1,10 +1,10 @@
 name: Deploy Pages (manual)
 
-# Ручной передеплой текущего состояния apt-репозитория из ветки gh-pages на Pages
-# через Actions (build_type=workflow), без нового релиза. Нужен для:
-#  - разового cutover-деплоя при переключении legacy → workflow (чтобы сайт не лёг);
-#  - экстренного передеплоя, если live-сайт разошёлся с веткой gh-pages.
-# Штатный деплой при релизе делает release.yml (джоба apt-repo) — этот воркфлоу его НЕ дублирует.
+# Manual redeploy of the apt repository's current state from the gh-pages branch to Pages
+# via Actions (build_type=workflow), without a new release. Needed for:
+#  - a one-time cutover deploy when switching legacy → workflow (so the site doesn't go down);
+#  - an emergency redeploy if the live site has diverged from the gh-pages branch.
+# The regular release deploy is done by release.yml (the apt-repo job) — this workflow does NOT duplicate it.
 on:
   workflow_dispatch:
 
@@ -28,7 +28,7 @@ jobs:
         with:
           ref: gh-pages
 
-      # Обслуживаем только dists/ + pool/ + статику; conf/, db/ и .git не сервим.
+      # Serve only dists/ + pool/ + static files; conf/, db/, and .git are not served.
       - name: Assemble servable site
         run: |
           mkdir _site

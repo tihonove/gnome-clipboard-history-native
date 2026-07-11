@@ -1,8 +1,8 @@
 //go:build linux
 
-// item.go — модель записи истории. Запись — это ЛИБО текст, ЛИБО картинка
-// (дискриминированное объединение по kind). Мутации истории (дедуп, лимиты)
-// тоже здесь, чтобы daemon.go оставался про сокет/бэкенд.
+// item.go — the history entry model. An entry is EITHER text OR an image
+// (a discriminated union by kind). History mutations (dedup, limits) live
+// here too, so daemon.go stays about the socket/backend.
 package main
 
 import (
@@ -16,33 +16,33 @@ import (
 type itemKind int
 
 const (
-	kindText  itemKind = iota // текстовая запись
-	kindImage                 // картинка
+	kindText  itemKind = iota // text entry
+	kindImage                 // image
 )
 
-// clipItem — одна запись истории буфера (только в памяти).
+// clipItem — a single clipboard history entry (in memory only).
 type clipItem struct {
 	kind itemKind
-	text string      // kindText: полный текст (вставляется целиком)
-	png  []byte      // kindImage: канонические PNG-байты (реотдача в буфер + дедуп)
-	pix  *gdk.Pixbuf // kindImage: декодированный полноразмерный pixbuf (SetImage + cover-рендер)
-	key  string      // идентичность записи для дедупа и метки self-set
+	text string      // kindText: the full text (pasted in full)
+	png  []byte      // kindImage: canonical PNG bytes (re-serving to the clipboard + dedup)
+	pix  *gdk.Pixbuf // kindImage: decoded full-size pixbuf (SetImage + cover-render)
+	key  string      // entry identity for dedup and the self-set marker
 }
 
-// maxImageBytes — байтовый бюджет на картинки в истории. Текстовые записи считаются
-// только по числу (maxHistory), картинки могут быть тяжёлыми (скриншоты), поэтому
-// сверх лимита вытесняем старейшие картинки, не трогая текст.
+// maxImageBytes — the byte budget for images in history. Text entries are counted
+// only by count (maxHistory); images can be heavy (screenshots), so beyond the limit
+// we evict the oldest images without touching text.
 const maxImageBytes = 64 << 20 // 64 MiB
 
-// pixbufFromPNG декодирует PNG-байты в pixbuf через gdk-pixbuf loader (PNG-лоадер
-// идёт с GTK3, внешних зависимостей нет). Вызывать из GTK-потока.
+// pixbufFromPNG decodes PNG bytes into a pixbuf via the gdk-pixbuf loader (the PNG
+// loader ships with GTK3, no external dependencies). Call from the GTK thread.
 func pixbufFromPNG(png []byte) (*gdk.Pixbuf, error) {
 	ld, err := gdk.PixbufLoaderNew()
 	if err != nil {
 		return nil, err
 	}
 	pix, err := ld.WriteAndReturnPixbuf(png)
-	ld.Close() // best-effort: pixbuf уже получен
+	ld.Close() // best-effort: the pixbuf is already obtained
 	if err != nil {
 		return nil, err
 	}
@@ -56,22 +56,22 @@ func imageKey(png []byte) string {
 	return "i:" + hex.EncodeToString(h[:])
 }
 
-// addItem кладёт запись наверх истории: дедуп по key (старая позиция убирается),
-// затем лимиты (число записей + байтовый бюджет картинок). Только в памяти.
-// Вызывать только из главного GTK-потока.
+// addItem puts an entry at the top of history: dedup by key (the old position is
+// removed), then limits (entry count + image byte budget). In memory only.
+// Call only from the main GTK thread.
 func addItem(it *clipItem) {
-	for i, e := range history { // дедуп: убрать старую позицию такой же записи
+	for i, e := range history { // dedup: remove the old position of the same entry
 		if e.key == it.key {
 			history = append(history[:i], history[i+1:]...)
 			break
 		}
 	}
-	history = append([]*clipItem{it}, history...) // свежее — сверху
+	history = append([]*clipItem{it}, history...) // newest on top
 	enforceLimits()
-	log.Printf("history: %d записей", len(history))
+	log.Printf("history: %d entries", len(history))
 }
 
-// enforceLimits обрезает историю по числу записей и по байтовому бюджету картинок.
+// enforceLimits trims history by entry count and by the image byte budget.
 func enforceLimits() {
 	if len(history) > maxHistory {
 		history = history[:maxHistory]
@@ -80,7 +80,7 @@ func enforceLimits() {
 	for _, e := range history {
 		total += len(e.png)
 	}
-	for total > maxImageBytes { // вытесняем старейшие картинки, пока не влезем в бюджет
+	for total > maxImageBytes { // evict the oldest images until we fit the budget
 		idx := -1
 		for i := len(history) - 1; i >= 0; i-- {
 			if history[i].kind == kindImage {

@@ -1,8 +1,8 @@
 name: Release
 
-# Релиз по пушу тега vX.Y.Z (тег обычно создаёт bump-version.yml):
-# собрать бинарник, упаковать .deb, сгенерировать changelog (git-cliff),
-# выложить GitHub Release и опубликовать apt-репозиторий на gh-pages.
+# Release triggered by pushing a vX.Y.Z tag (the tag is usually created by bump-version.yml):
+# build the binary, package the .deb, generate the changelog (git-cliff),
+# publish a GitHub Release and publish the apt repository to gh-pages.
 on:
   push:
     tags:
@@ -15,10 +15,10 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
     with:
-      version: ${{ github.ref_name }} # vX.Y.Z; build.yml срежет ведущую v
+      version: ${{ github.ref_name }} # vX.Y.Z; build.yml strips the leading v
 
-  # Собрать .deb из готового бинарника (nfpm). Пакет кладёт бинарник + статическое
-  # udev-правило (uaccess); установку в сессии делает `gnome-clipboard-history-native --install`.
+  # Build the .deb from the ready binary (nfpm). The package installs the binary + a static
+  # udev rule (uaccess); the in-session setup is done by `gnome-clipboard-history-native --install`.
   package:
     needs: build
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
       - name: Download binary
         uses: actions/download-artifact@v4
         with:
-          name: gnome-clipboard-history-native-linux-x64 # → ./gnome-clipboard-history-native-linux-x64 (nfpm.yaml ждёт его тут)
+          name: gnome-clipboard-history-native-linux-x64 # → ./gnome-clipboard-history-native-linux-x64 (nfpm.yaml expects it here)
 
       - uses: actions/setup-go@v5
         with:
@@ -39,7 +39,7 @@ jobs:
 
       - name: Build .deb
         run: |
-          export VERSION="${GITHUB_REF_NAME#v}" # тег без ведущей v → semver
+          export VERSION="${GITHUB_REF_NAME#v}" # tag without leading v → semver
           "$(go env GOPATH)/bin/nfpm" pkg \
             --config packaging/nfpm.yaml \
             --packager deb \
@@ -51,21 +51,21 @@ jobs:
           path: "*.deb"
           if-no-files-found: error
 
-  # GitHub Release: бинарник + .deb + changelog за последний тег.
+  # GitHub Release: binary + .deb + changelog for the latest tag.
   release:
     needs: [build, package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # git-cliff нужна вся история
+          fetch-depth: 0 # git-cliff needs the full history
 
       - name: Generate changelog
         id: cliff
         uses: orhun/git-cliff-action@v4
         with:
-          # Группировка/фильтрация — в cliff.toml. В changelog попадают только
-          # пользовательские изменения (feat/fix/perf/security).
+          # Grouping/filtering lives in cliff.toml. Only user-facing changes
+          # (feat/fix/perf/security) make it into the changelog.
           config: cliff.toml
           args: --latest --strip all
 
@@ -73,7 +73,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          merge-multiple: true # бинарник + .deb в одну папку
+          merge-multiple: true # binary + .deb into a single folder
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -82,18 +82,18 @@ jobs:
           body: ${{ steps.cliff.outputs.content }}
           files: artifacts/*
 
-  # Опубликовать .deb в apt-репозиторий и задеплоить сайт на GitHub Pages.
-  # Ветка gh-pages — ТОЛЬКО персистентное состояние reprepro (pool/db/dists копятся);
-  # обслуживание сайта — через Actions-деплой (build_type=workflow), НЕ сервинг ветки.
-  # Одна джоба делает всё: reprepro → push состояния в gh-pages → upload+deploy артефакта.
+  # Publish the .deb to the apt repository and deploy the site to GitHub Pages.
+  # The gh-pages branch is ONLY reprepro's persistent state (pool/db/dists accumulate there);
+  # the site is served via an Actions deploy (build_type=workflow), NOT by serving the branch.
+  # A single job does it all: reprepro → push state to gh-pages → upload+deploy the artifact.
   apt-repo:
     needs: package
     runs-on: ubuntu-latest
     permissions:
-      contents: write # git push состояния в ветку gh-pages
+      contents: write # git push state to the gh-pages branch
       pages: write # actions/deploy-pages
-      id-token: write # OIDC для actions/deploy-pages
-    # Один активный деплой Pages за раз (релизы и так последовательны).
+      id-token: write # OIDC for actions/deploy-pages
+    # One active Pages deploy at a time (releases are sequential anyway).
     concurrency:
       group: pages
       cancel-in-progress: false
@@ -101,7 +101,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4 # main: шаблоны из packaging/apt
+      - uses: actions/checkout@v4 # main: templates from packaging/apt
 
       - name: Download .deb
         uses: actions/download-artifact@v4
@@ -117,7 +117,7 @@ jobs:
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
           if [ -z "$APT_GPG_PRIVATE_KEY" ]; then
-            echo "::error::secret APT_GPG_PRIVATE_KEY не задан — репозиторий не подписать." >&2
+            echo "::error::secret APT_GPG_PRIVATE_KEY is not set — cannot sign the repository." >&2
             exit 1
           fi
           echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
@@ -126,36 +126,36 @@ jobs:
 
       - name: Assemble & sign repository
         run: |
-          # Забрать текущее дерево репозитория (первый релиз — создать пустое).
+          # Fetch the current repository tree (on the first release, create an empty one).
           if git clone --depth 1 --branch gh-pages \
                "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" pages; then
-            echo "gh-pages подтянут"
+            echo "gh-pages fetched"
           else
-            echo "gh-pages нет — инициализирую"
+            echo "gh-pages missing — initializing"
             mkdir pages && (cd pages && git init -b gh-pages)
           fi
 
-          # conf/distributions с реальным fingerprint подписи.
+          # conf/distributions with the real signing fingerprint.
           mkdir -p pages/conf
           sed "s/__FINGERPRINT__/${FPR}/" packaging/apt/conf/distributions > pages/conf/distributions
 
-          # Статика: установщики (apt + standalone) + публичный ключ.
+          # Static files: installers (apt + standalone) + the public key.
           cp packaging/apt/install.sh packaging/apt/install-standalone.sh pages/
           gpg --export "${FPR}" > pages/gnome-clipboard-history-native-archive-keyring.gpg
 
-          # Добавить пакет в компонент stable/main (подпись Release автоматом).
+          # Add the package to the stable/main component (Release is signed automatically).
           reprepro -b pages includedeb stable debs/*.deb
           reprepro -b pages list stable
 
-      # Запушить обновлённое состояние reprepro в gh-pages (стейт-стор, не сервинг).
-      # No-op-терпимо: ре-ран того же тега / повторный deb не меняют дерево — это ОК,
-      # а не ошибка (раньше пустой `git commit` ронял всю джобу).
+      # Push the updated reprepro state to gh-pages (state store, not serving).
+      # No-op tolerant: re-running the same tag / a repeated deb doesn't change the tree — that's OK,
+      # not an error (an empty `git commit` used to fail the whole job).
       - name: Publish gh-pages state
         run: |
           cd pages
           git add -A
           if git diff --cached --quiet; then
-            echo "apt-репозиторий без изменений — пуш не нужен (деплой всё равно выполним)"
+            echo "apt repository unchanged — no push needed (we deploy anyway)"
           else
             git -c user.name="github-actions[bot]" \
                 -c user.email="github-actions[bot]@users.noreply.github.com" \
@@ -164,16 +164,16 @@ jobs:
                 HEAD:gh-pages
           fi
 
-      # Собрать обслуживаемое дерево: только то, что нужно клиентам apt
-      # (dists/ + pool/) и статика. Внутренности reprepro (conf/, db/) и .git НЕ сервим.
+      # Build the served tree: only what apt clients need
+      # (dists/ + pool/) plus the static files. reprepro internals (conf/, db/) and .git are NOT served.
       - name: Assemble servable site
         run: |
           mkdir _site
           rsync -a --exclude='.git' --exclude='conf' --exclude='db' --exclude='_site' \
             pages/ _site/
 
-      # Синхронный деплой через Actions (build_type=workflow) — статус виден в ЭТОМ
-      # прогоне, без отдельного флакающего воркфлоу «pages build and deployment».
+      # Synchronous deploy via Actions (build_type=workflow) — the status is visible in THIS
+      # run, without a separate flaky "pages build and deployment" workflow.
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

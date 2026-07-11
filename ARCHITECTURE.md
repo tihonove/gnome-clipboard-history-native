@@ -1,154 +1,161 @@
-# Архитектура
+# Architecture
 
-Документ описывает, как устроен `gnome-clipboard-history-native` и почему приняты именно такие решения.
-Многие из них — следствие ограничений X11/GNOME, а не свободного выбора.
+This document describes how `gnome-clipboard-history-native` is built and why these particular
+decisions were made. Many of them are consequences of X11/GNOME limitations, not
+free choices.
 
-## Обзор
+## Overview
 
-Одно резидентное приложение-демон на Go, которое:
-1. слушает unix-сокет и по команде показывает попап-список у курсора;
-2. рисует список средствами **GTK** (чтобы получить нативную тему Yaru даром);
-3. читает клавиши и делает вставку средствами **xgb** (низкоуровневый X11),
-   потому что GTK-путь для нашего типа окна не работает (см. ниже).
+A single resident daemon application in Go that:
+1. listens on a unix socket and, on command, shows a popup list at the cursor;
+2. draws the list with **GTK** (to get the native Yaru theme for free);
+3. reads keys and performs the paste with **xgb** (low-level X11), because the GTK
+   path doesn't work for our kind of window (see below).
 
-«Клиент» (`gnome-clipboard-history-native --show`) — это тонкий процесс-«звонок», которого запускает
-горячая клавиша GNOME; он лишь будит демона через сокет и завершается.
+The "client" (`gnome-clipboard-history-native --show`) is a thin "call" process launched by the
+GNOME hotkey; it just wakes the daemon over the socket and exits.
 
-## Поток управления
+## Control flow
 
 ```
 [Super+B]  (GNOME custom keybinding)
-    │  запускает команду
+    │  runs the command
     ▼
-gnome-clipboard-history-native --show ──unix-socket──►  демон: слушатель сокета (горутина)
-                                     │  glib.IdleAdd (в GTK-поток)
+gnome-clipboard-history-native --show ──unix-socket──►  daemon: socket listener (goroutine)
+                                     │  glib.IdleAdd (into the GTK thread)
                                      ▼
                                  showPopup():
-                                   • ewmh.ActiveWindowGet → целевое окно
-                                   • построить GTK-окно (POPUP) + список
-                                   • позиционировать (popupXY)
-                                   • GrabKeyboard на root (с ретраями)
-                                   • запустить поллинг клавиш (glib.TimeoutAdd 8мс)
+                                   • ewmh.ActiveWindowGet → target window
+                                   • build the GTK window (POPUP) + list
+                                   • position it (popupXY)
+                                   • GrabKeyboard on root (with retries)
+                                   • start key polling (glib.TimeoutAdd 8ms)
                                      │
                      Up/Down/PageUp/PageDown/Home/End → setSel → updateSelection
-                     Enter → finish(true) → вставка выбранного
-                     Escape / таймаут 15с → finish(false)
+                     Enter → finish(true) → paste the selected entry
+                     Escape / 15s timeout → finish(false)
                                      │
                                      ▼
                                  finish():
-                                   • Ungrab, уничтожить окно
+                                   • Ungrab, destroy the window
                                    • (paste) clip.SetText + pasteInto(term)
 ```
 
-## Компоненты
+## Components
 
-- **Демон** (`runDaemon`): `gtk.Main()`. Единственный инстанс (проверка сокета
-  `Dial` перед `Listen`). Держит X-соединение `xgbutil` для xgb-операций и GTK
-  для UI.
-- **Клиент** (`runClient`): `net.Dial` к сокету, шлёт `show`, выходит.
-- **Сокет**: `$XDG_RUNTIME_DIR/gnome-clipboard-history-native.sock`. Слушается в горутине; показ окна
-  маршалится в GTK-поток через `glib.IdleAdd` (xgb/GTK не потокобезопасны).
+- **Daemon** (`runDaemon`): `gtk.Main()`. Single instance (a socket `Dial` check
+  before `Listen`). Holds an `xgbutil` X connection for xgb operations and GTK for
+  the UI.
+- **Client** (`runClient`): `net.Dial` to the socket, sends `show`, exits.
+- **Socket**: `$XDG_RUNTIME_DIR/gnome-clipboard-history-native.sock`. Listened on in a goroutine;
+  showing the window is marshaled into the GTK thread via `glib.IdleAdd` (xgb/GTK
+  aren't thread-safe).
 
-## Гибрид GTK + xgb — почему
+## The GTK + xgb hybrid — why
 
-GTK даёт нативную тему (Yaru), CSS, шрифты, список — всё «как в системе». Но:
+GTK gives the native theme (Yaru), CSS, fonts, a list — everything "as in the
+system". But:
 
-- Окно попапа — `GTK_WINDOW_POPUP` (override-redirect): без рамки, точно в точке,
-  вне управления WM.
-- Такому «самому всплывшему» окну GNOME **не даёт фокус клавиатуры**
-  (focus-stealing prevention), поэтому GTK-обработчики клавиш не срабатывают.
-- Поэтому ввод берём в обход GTK: `xproto.GrabKeyboard` на **root** (owner_events
-  = false → все клавиши идут нам), а события вычитываем поллингом
-  `X.Conn().PollForEvent()` в `glib.TimeoutAdd(8мс)`. Выделение в списке двигаем
-  вручную (`listBox.SelectRow` + прокрутка).
-- Побочный плюс: раз мы не уводили X-фокус у целевого окна (grab ≠ SetInputFocus),
-  после Ungrab вставка летит сразу в цель — без «доводки» фокуса и задержек.
+- The popup window is a `GTK_WINDOW_POPUP` (override-redirect): frameless, exactly
+  at a point, outside WM control.
+- GNOME **doesn't give keyboard focus** to such a "self-popped-up" window
+  (focus-stealing prevention), so GTK key handlers don't fire.
+- So we take input around GTK: `xproto.GrabKeyboard` on **root** (owner_events =
+  false → all keys come to us), and we read events by polling
+  `X.Conn().PollForEvent()` in `glib.TimeoutAdd(8ms)`. We move the list selection
+  manually (`listBox.SelectRow` + scroll).
+- Side benefit: since we never took X focus away from the target window (grab ≠
+  SetInputFocus), after Ungrab the paste flies straight into the target — without
+  focus "fixup" and delays.
 
-## Горячая клавиша — почему через GNOME
+## Hotkey — why through GNOME
 
-Под GNOME/mutter приложение **не может** перехватить `Super+<клавиша>` через
-XGrabKey: mutter сам держит Super. Поэтому клавишу вешает сам GNOME (gsettings
-custom keybinding) на запуск `gnome-clipboard-history-native --show`. Это же причина, по которой нужен
-«клиент»-звонок, а не самоперехват в демоне.
+Under GNOME/mutter an application **cannot** intercept `Super+<key>` via XGrabKey:
+mutter holds Super itself. So the key is bound by GNOME itself (a gsettings custom
+keybinding) to launch `gnome-clipboard-history-native --show`. This is also why we need a "client"
+call rather than self-interception in the daemon.
 
-## Позиционирование (`popupXY`)
+## Positioning (`popupXY`)
 
-- Если курсор мыши **внутри** активного окна — попап у мыши.
-- Иначе — по **центру** активного окна.
-- Геометрия окна: `GetGeometry` (размер) + `TranslateCoordinates` (абсолютная
-  позиция; напрямую из GetGeometry нельзя — WM переродителивает окно рамкой).
-- В конце — clamp к границам экрана.
+- If the mouse cursor is **inside** the active window — the popup is at the mouse.
+- Otherwise — at the **center** of the active window.
+- Window geometry: `GetGeometry` (size) + `TranslateCoordinates` (absolute position;
+  it can't be taken directly from GetGeometry — the WM reparents the window with a
+  frame).
+- Finally — clamp to the screen bounds.
 
-## Вставка (`finish` → `pasteInto`)
+## Paste (`finish` → `pasteInto`)
 
-1. Владение буфером: `clip.SetText` — демон жив, поэтому сам обслуживает
-   последующий запрос вставки. Внешний `xsel` не нужен.
-2. Целевое окно определено заранее (`ewmh.ActiveWindowGet` на показе).
-3. **Раскладко-независимость** (самое неочевидное; подробности — в комментарии над
-   `setupSpareKey`). Нельзя слать реальный keycode 'v': в русской группе на этой
-   клавише кириллица → выходит «м». Держим **запасной неиспользуемый keycode**,
-   замапленный на 'v'/'V' во **всех** группах, и шлём его — тогда в любой раскладке
-   на нём 'v'. Реальный keycode не годится ещё и потому, что терминалы (kitty)
-   ведут активную группу сами.
-   - Мапим (`setupSpareKey`) при **открытии** попапа — чтобы приложения успели
-     асинхронно перечитать keymap до нажатия; возвращаем в NoSymbol
-     (`restoreSpareKey`) через ~300 мс после закрытия.
-   - **Почему временно, а не навсегда:** если 'v' постоянно висит на запасном
-     keycode, mutter резолвит на него `Super+V` (в русской раскладке 'v' больше
-     нигде нет) → физический Super+V перестаёт открывать попап. Пока попап открыт,
-     клавиатура и так захвачена, Super+V не нужен.
-   - **Почему возврат с задержкой:** Qt/Electron читают событие асинхронно;
-     вернёшь мэппинг сразу — увидят NoSymbol и не вставят.
-   - `keysymsPerKeycode` берём серверный, иначе смещение групп ломается.
-4. **Терминал-aware:** по `WM_CLASS` целевого окна (`icccm.WmClassGet`) терминалам
-   (kitty/gnome-terminal/konsole/foot/alacritty/ghostty/…) шлём **Ctrl+Shift+V**,
-   остальным — **Ctrl+V**.
-5. Инжект — нативный **XTEST** (`xtest.FakeInput`), без спавна внешних процессов
-   (спавн `xdotool` давал видимую задержку, особенно в русской раскладке, где ему
-   приходится самому перемапливать).
+1. Clipboard ownership: `clip.SetText` — the daemon is alive, so it serves the
+   subsequent paste request itself. No external `xsel` needed.
+2. The target window is determined ahead of time (`ewmh.ActiveWindowGet` at show).
+3. **Layout independence** (the least obvious part; details — in the comment above
+   `setupSpareKey`). You can't send the real keycode for 'v': in the Russian group
+   that key produces Cyrillic → you get "м". We keep a **spare unused keycode**,
+   mapped to 'v'/'V' in **all** groups, and send it — then in any layout it's 'v'.
+   The real keycode also won't do because terminals (kitty) manage the active group
+   themselves.
+   - We map it (`setupSpareKey`) when the popup **opens** — so apps have time to
+     asynchronously re-read the keymap before the keypress; we restore it to NoSymbol
+     (`restoreSpareKey`) ~300 ms after it closes.
+   - **Why temporarily, not permanently:** if 'v' hangs permanently on the spare
+     keycode, mutter resolves `Super+V` to it (in the Russian layout 'v' exists
+     nowhere else) → physical Super+V stops opening the popup. While the popup is
+     open, the keyboard is grabbed anyway, so Super+V isn't needed.
+   - **Why a delayed restore:** Qt/Electron read the event asynchronously; if you
+     restore the mapping immediately, they'll see NoSymbol and won't paste.
+   - We take `keysymsPerKeycode` from the server, otherwise the group offset breaks.
+4. **Terminal-aware:** by the target window's `WM_CLASS` (`icccm.WmClassGet`) we send
+   **Ctrl+Shift+V** to terminals (kitty/gnome-terminal/konsole/foot/alacritty/
+   ghostty/…), and **Ctrl+V** to everyone else.
+5. Injection — native **XTEST** (`xtest.FakeInput`), without spawning external
+   processes (spawning `xdotool` gave a visible delay, especially in the Russian
+   layout, where it has to remap itself).
 
-## Внешний вид
+## Appearance
 
-- Тема Yaru подхватывается автоматически (GTK читает `gtk-theme`).
-- Кастомный CSS (через `CssProvider` с приоритетом USER) поверх темы:
-  скруглённая «рамка»-обёртка (окно RGBA-прозрачное → скруглённые углы + тень,
-  без кнопок управления), акцентная **обводка** выделенной строки в стиле фокуса
-  файла в Nautilus.
-- Каждая запись — **ровно 3 строки**: длинные обрезаются (`displayText`, без
-  переноса + ellipsize справа), короткие дополняются пустыми строками. Высота
-  списка — ~3.5 записи (намёк на прокрутку).
+- The Yaru theme is picked up automatically (GTK reads `gtk-theme`).
+- Custom CSS (via `CssProvider` with USER priority) on top of the theme: a rounded
+  "frame" wrapper (RGBA-transparent window → rounded corners + shadow, no control
+  buttons), an accent **outline** on the selected row in the style of Nautilus file
+  focus.
+- Each entry is **exactly 3 lines**: long ones are truncated (`displayText`, no wrap
+  + ellipsize on the right), short ones are padded with empty lines. The list height
+  is ~3.5 entries (a hint of scrolling).
 
-## Зависимости
+## Dependencies
 
-- `github.com/gotk3/gotk3` **v0.6.3** — Go-биндинги GTK3/GDK/GLib/Pango (cgo).
-  Не v0.6.4: в ней недостающий импорт в `gdk`, не собирается.
-- `github.com/jezek/xgb` + `github.com/jezek/xgbutil` — чистый X11: grab, XTEST,
-  EWMH (активное окно), ICCCM (WM_CLASS), keybind (keycodes), poll событий.
+- `github.com/gotk3/gotk3` **v0.6.3** — Go bindings for GTK3/GDK/GLib/Pango (cgo). Not
+  v0.6.4: it has a missing import in `gdk`, doesn't build.
+- `github.com/jezek/xgb` + `github.com/jezek/xgbutil` — pure X11: grab, XTEST, EWMH
+  (active window), ICCCM (WM_CLASS), keybind (keycodes), event poll.
 
-## Установка и релизы
+## Installation and releases
 
-- **Установка** встроена в бинарник: `gnome-clipboard-history-native --install` пишет автозапуск
-  (`~/.config/autostart/gnome-clipboard-history-native.desktop` на путь бинарника) и хоткей `Super+Ctrl+V`
-  (gsettings, свободным слотом, не трогая чужие; повторный `--install` перевешивает
-  свой слот), запускает демона; идемпотентно.
-  `--uninstall` — снимает всё и останавливает демона (сокет-команда `quit`).
-  Идея — распространять один бинарник, пользователь кладёт его и делает `--install`.
-- **Релизы** — GitHub Actions (`.github/workflows/`): `bump-version` (ручной,
-  поднимает `VERSION` + тег) → `release` (сборка `build.yml` + changelog git-cliff
-  + GitHub Release). Конвенция коммитов и процесс — в `CLAUDE.md`.
+- **Installation** is built into the binary: `gnome-clipboard-history-native --install` writes
+  autostart (`~/.config/autostart/gnome-clipboard-history-native.desktop` pointing at the binary path)
+  and the `Super+Ctrl+V` hotkey (gsettings, in a free slot, without touching others;
+  a repeated `--install` rebinds its own slot), and starts the daemon; idempotent.
+  `--uninstall` — removes everything and stops the daemon (the `quit` socket command).
+  The idea is to distribute a single binary; the user drops it in and runs
+  `--install`.
+- **Releases** — GitHub Actions (`.github/workflows/`): `bump-version` (manual, bumps
+  `VERSION` + tag) → `release` (build via `build.yml` + git-cliff changelog + GitHub
+  Release). The commit convention and process — in `CLAUDE.md`.
 
-## Текущие ограничения / TODO
+## Current limitations / TODO
 
-- Только **текст**, только **в памяти** (без диска — намеренно). Нет картинок.
-- **Wayland (GNOME): бэкенд** (`cmd/gnome-clipboard-history-native/wayland.go` + `internal/uinput`) — попап по центру
-  (обычный toplevel + `focus-out`), вставка `Shift+Insert` через `/dev/uinput`. Работает
-  в Chrome (нативный Wayland), Telegram (XWayland) и консоли, в обеих раскладках.
-  **История — через XWayland-мост:** фоновый wl-путь чужой буфер не видит (mutter не даёт
-  `data-control`), но mutter зеркалит буфер в X11 CLIPBOARD, и мы ловим XFIXES-уведомления
-  по XWayland и читаем селекшн in-process по xgb (без внешних утилит — как CopyQ) — быстрые
-  копирования не теряются (событийно). Требует только XWayland (`$DISPLAY`). `wl-paste
-  --watch` не годится (требует wlroots data-control). Позиционирование у курсора под
-  Wayland невозможно by design.
-  X11-путь — полноценный (у курсора, XTEST, история через GTK owner-change).
-- Нет поиска по истории, нет настроек, нет плейсхолдера-иконки.
-- Сборка только `linux-x64` (arm64 — при желании добавить в матрицу build.yml).
+- **Text** only, **in memory** only (no disk — intentional). No images.
+- **Wayland (GNOME): backend** (`cmd/gnome-clipboard-history-native/wayland.go` + `internal/uinput`) —
+  centered popup (a regular toplevel + `focus-out`), `Shift+Insert` paste via
+  `/dev/uinput`. Works in Chrome (native Wayland), Telegram (XWayland) and the
+  console, in both layouts. **History — via an XWayland bridge:** the background wl
+  path can't see another app's clipboard (mutter doesn't grant `data-control`), but
+  mutter mirrors the clipboard into the X11 CLIPBOARD, and we catch XFIXES
+  notifications over XWayland and read the selection in-process via xgb (no external
+  utilities — like CopyQ) — fast copies aren't lost (event-driven). Requires only
+  XWayland (`$DISPLAY`). `wl-paste --watch` won't do (it requires wlroots
+  data-control). At-cursor positioning under Wayland is impossible by design. The
+  X11 path is full-featured (at the cursor, XTEST, history via GTK owner-change).
+- No search over history, no settings, no placeholder icon.
+- Build only `linux-x64` (arm64 — add to the build.yml matrix if desired).

@@ -1,4 +1,4 @@
-# собранные бинарники (пересобираются через `go build`)
+# built binaries (rebuilt via `go build`)
 /gnome-clipboard-history-native
 /gnome-clipboard-history-native-linux-x64
 *.deb
