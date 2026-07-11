@@ -22,7 +22,7 @@ import (
 	"github.com/tihonove/gnome-clipboard-history-native/internal/uinput"
 )
 
-const maxHistory = 100 // сколько записей держим в памяти
+const maxHistory = 25 // сколько записей держим в памяти
 
 var (
 	clipboard *gtk.Clipboard // CLIPBOARD: и слушаем, и владеем им при вставке
