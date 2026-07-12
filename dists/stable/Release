@@ -1,19 +1,19 @@
 Origin: gnome-clipboard-history-native
 Label: gnome-clipboard-history-native
 Codename: stable
-Date: Tue, 07 Jul 2026 00:16:18 UTC
+Date: Sun, 12 Jul 2026 00:27:15 UTC
 Architectures: amd64
 Components: main
 Description: gnome-clipboard-history-native — clipboard history (Super+Ctrl+V) for GNOME
 MD5Sum:
- 91bb84138e5ff293b29ab25ad868a8da 753 main/binary-amd64/Packages
- fb083b1b26f81a180d62a4182a43dbfe 527 main/binary-amd64/Packages.gz
+ 0cfab9460a1390c7af474a78b4ff45c6 1010 main/binary-amd64/Packages
+ 6355199bda5125c8b311d6203473905c 638 main/binary-amd64/Packages.gz
  d51ceb2afce43f5318bba1e9ba2bdc6c 204 main/binary-amd64/Release
 SHA1:
- 9587ee262b6eef92acf255e9347e44e1929aa4f8 753 main/binary-amd64/Packages
- 6ed4a014d9394a23365464a544047c03178aa936 527 main/binary-amd64/Packages.gz
+ c9169068324f170d9465f393e0684aa92aa3ae65 1010 main/binary-amd64/Packages
+ ce7c0eff1c7e4fb22930525bfe11fa5764a80a6e 638 main/binary-amd64/Packages.gz
  e7a974cf8edfba1d4e68e45229ad9961ae668444 204 main/binary-amd64/Release
 SHA256:
- d1e8e0134882f9fd9eb012c807c73cb6020f154f0ff6506c2261cdc0b097510c 753 main/binary-amd64/Packages
- e5551bd08687acc72b6857d614128fd25b32142d4899b5077d722f4d79876e5a 527 main/binary-amd64/Packages.gz
+ 7f1b419afe342abd4b664d7b3d4b14493d595762244748ac2c8325049d8bffcb 1010 main/binary-amd64/Packages
+ 575035877af6e25be3339b9cb786e4262a9c0ab365fa285b0d5d294e5500e0e6 638 main/binary-amd64/Packages.gz
  88a048f51f6f182c0e93abdc73875affabef33c496759fcfd3eaa83e8641aeea 204 main/binary-amd64/Release

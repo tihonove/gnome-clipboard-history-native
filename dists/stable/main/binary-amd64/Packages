@@ -1,18 +1,23 @@
 Package: gnome-clipboard-history-native
-Version: 0.5.2
+Version: 1.0.0
 Architecture: amd64
 Maintainer: Eugene Tihonov <tihonov.ea@gmail.com>
-Installed-Size: 4912
+Installed-Size: 7120
 Depends: libgtk-3-0, libglib2.0-bin
 Recommends: xwayland
 Homepage: https://github.com/tihonove/gnome-clipboard-history-native
 Priority: optional
 Section: utils
-Filename: pool/main/g/gnome-clipboard-history-native/gnome-clipboard-history-native_0.5.2_amd64.deb
-Size: 1671992
-SHA256: 02aac1b54a0d6b5436a4e8666dd1cf8afe49ee64f92bfbeab0ea091281d94189
-SHA1: c42539ff765200b6f4f9b23961f6c21d9282f3a2
-MD5sum: 3b53b15f9a783b11d2c85d064551d7ad
-Description: Clipboard history (Super+Ctrl+V) for GNOME on X11 and Wayland.
- TODO: развёрнутое описание для магазина/репозитория.
+Filename: pool/main/g/gnome-clipboard-history-native/gnome-clipboard-history-native_1.0.0_amd64.deb
+Size: 2647578
+SHA256: 51db8426523749408a2ca33d10ac5002ca1788d52037e31f8dca6d406f42744e
+SHA1: b4b327e88503e1e3a8747be79cc6b40ca228e889
+MD5sum: dc2275adc6c70b5c38b0c05a0ca86496
+Description: Clipboard history popup for GNOME (Super+Ctrl+V)
+ A resident GTK daemon that remembers what you copy and pops it up on
+ Super+Ctrl+V, like the Windows clipboard history. Arrows pick an entry,
+ Enter pastes it into the active window. Keeps both text and images and
+ matches the Yaru theme. Works on X11 and Wayland. History is kept in
+ memory only (no disk, no sync) — it does clipboard history and nothing
+ else.
 
