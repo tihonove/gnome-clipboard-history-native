@@ -86,7 +86,7 @@ func watchConfig() {
 	}
 	if err := w.Add(dir); err != nil {
 		log.Printf("config: can't watch %s, live reload disabled: %v", dir, err)
-		w.Close()
+		_ = w.Close()
 		return
 	}
 	exe := resolveExe()
