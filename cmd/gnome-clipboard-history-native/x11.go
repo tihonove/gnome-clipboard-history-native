@@ -216,8 +216,15 @@ func finish(paste bool) {
 			setClipboardImage(it.png, it.pix)
 			pasteInto(false) // paste images with Ctrl+V; terminals don't take them
 		} else if it.text != "" {
-			setClipboard(it.text)
-			pasteInto(isTerminal(targetWin)) // terminals get Ctrl+Shift+V, everything else Ctrl+V
+			term := isTerminal(targetWin) // terminals get Ctrl+Shift+V, everything else Ctrl+V
+			txt := it.text
+			if term {
+				// Don't let a trailing newline auto-run the pasted command in a shell
+				// (CopyQ #2573). Only the served copy is trimmed; history keeps the full text.
+				txt = strings.TrimRight(txt, "\r\n")
+			}
+			setClipboard(txt)
+			pasteInto(term)
 		}
 	}
 	listBox = nil
