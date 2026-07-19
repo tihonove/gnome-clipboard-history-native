@@ -135,15 +135,24 @@ func startClipboardWatch() {
 // ingestText puts new clipboard text into the history, skipping our own pastes
 // (self-set) so the selected entry doesn't jump to the top. Call only from the GTK thread.
 func ingestText(txt string) {
+	txt = cleanCaptured(txt)
+	if strings.TrimSpace(txt) == "" {
+		return
+	}
 	key := textKey(txt)
 	if selfSetPending && key == selfSetKey {
 		selfSetPending = false // this is our own paste — don't touch the order
 		return
 	}
-	if strings.TrimSpace(txt) == "" {
-		return
-	}
 	addItem(&clipItem{kind: kindText, text: txt, key: key})
+}
+
+// cleanCaptured normalizes clipboard text before it enters history: it strips a
+// trailing NUL terminator that some apps append (CopyQ #681), otherwise shown as a
+// garbage char in the popup. Newlines are preserved — apps rely on a trailing \n,
+// and the terminal auto-run hazard is handled at paste time instead (see finish()).
+func cleanCaptured(s string) string {
+	return strings.TrimRight(s, "\x00")
 }
 
 // ingestImage puts a new image into the history, skipping our self-sets. png is
